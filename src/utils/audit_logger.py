@@ -322,18 +322,21 @@ class AuditLogger:
         self,
         events: list[AuditEvent] | None = None,
         exported_at: datetime | None = None,
+        destination: str | Path | None = None,
     ) -> Path:
         """Xuất nhật ký ra CSV UTF-8 with BOM trong thư mục reports.
 
         Args:
             events: Danh sách cần xuất; None xuất toàn bộ nhật ký nội bộ.
             exported_at: Thời gian dùng đặt tên; None dùng giờ địa phương hiện tại.
+            destination: Đường dẫn CSV tùy chọn nằm trực tiếp trong reports.
 
         Returns:
             Đường dẫn tuyệt đối của báo cáo CSV đã ghi thành công.
 
         Raises:
             TypeError: Khi danh sách sự kiện hoặc exported_at sai kiểu.
+            ValueError: Khi destination không phải CSV trong thư mục reports.
             OSError: Khi không thể tạo hoặc ghi tệp CSV.
             csv.Error: Khi writer gặp lỗi định dạng dữ liệu.
         """
@@ -342,7 +345,17 @@ class AuditLogger:
         if not isinstance(timestamp, datetime):
             raise TypeError("exported_at phải là datetime hoặc None.")
         self.reports_dir.mkdir(parents=True, exist_ok=True)
-        report_path = self._build_unique_report_path(timestamp)
+        if destination is None:
+            report_path = self._build_unique_report_path(timestamp)
+        else:
+            report_path = Path(destination).resolve()
+            if (
+                report_path.parent != self.reports_dir.resolve()
+                or report_path.suffix.lower() != ".csv"
+            ):
+                raise ValueError(
+                    "destination phải là tệp .csv trực tiếp trong output_data/reports."
+                )
         temporary_path = report_path.with_suffix(".csv.tmp")
 
         try:
