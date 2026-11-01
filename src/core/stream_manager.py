@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import argparse
 import logging
 import math
 import queue
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -166,6 +168,22 @@ class StreamManager:
                 thread is not None
                 and thread.is_alive()
                 and not self._stop_event.is_set()
+            )
+
+    @property
+    def signal_lost(self) -> bool:
+        """Cho biết nguồn video đang mất tín hiệu hoặc trong chu kỳ kết nối lại.
+
+        Args:
+            None.
+
+        Returns:
+            True khi luồng đang kết nối lại hoặc gặp lỗi; ngược lại là False.
+        """
+        with self._state_lock:
+            return self._status.state in (
+                StreamState.RECONNECTING,
+                StreamState.ERROR,
             )
 
     def start_stream(self, source: VideoSource | None = None) -> None:
@@ -539,12 +557,80 @@ class StreamManager:
                 return
             self._status = status
 
-        if self.status_queue.full():
+            if self.status_queue.full():
+                try:
+                    self.status_queue.get_nowait()
+                except queue.Empty:
+                    pass
             try:
-                self.status_queue.get_nowait()
-            except queue.Empty:
-                pass
+                self.status_queue.put_nowait(status)
+            except queue.Full:
+                LOGGER.warning("Không thể cập nhật status queue của luồng camera.")
+
+
+def main() -> int:
+    """Chạy màn hình thử độc lập để kiểm tra nguồn camera hoặc video.
+
+    Args:
+        None. Tùy chọn dòng lệnh ``--source`` nhận webcam ID, đường dẫn video
+        hoặc URL RTSP; nhấn ``q`` trên cửa sổ video để thoát.
+
+    Returns:
+        Mã thoát 0 nếu chạy và dừng bình thường, 1 nếu gặp lỗi vận hành.
+    """
+    for output_stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(output_stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+    parser = argparse.ArgumentParser(
+        description="Kiểm tra độc lập StreamManager của VisionGuard AI."
+    )
+    parser.add_argument(
+        "--source",
+        default="0",
+        help="Webcam ID, tệp .mp4/.avi hoặc URL RTSP (mặc định: 0).",
+    )
+    arguments = parser.parse_args()
+    source: VideoSource = (
+        int(arguments.source)
+        if arguments.source.isdecimal()
+        else arguments.source
+    )
+
+    manager = StreamManager(source=source)
+    last_status: StreamStatus | None = None
+    exit_code = 0
+    try:
+        manager.start_stream()
+        while manager.is_running:
+            status = manager.read_latest_status(timeout=0.01)
+            if status is not None and status != last_status:
+                print(status.message, flush=True)
+                last_status = status
+
+            frame = manager.read_latest_frame(timeout=0.05)
+            if frame is not None:
+                cv2.imshow("VisionGuard - StreamManager Test", frame)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+    except Exception:
+        LOGGER.exception("Lỗi khi chạy kiểm tra độc lập StreamManager.")
+        exit_code = 1
+    finally:
         try:
-            self.status_queue.put_nowait(status)
-        except queue.Full:
-            LOGGER.warning("Không thể cập nhật status queue của luồng camera.")
+            manager.stop_stream()
+        except Exception:
+            LOGGER.exception("Không thể dừng luồng camera trong chế độ kiểm tra.")
+            exit_code = 1
+        try:
+            cv2.destroyAllWindows()
+        except cv2.error:
+            LOGGER.exception("Không thể đóng cửa sổ kiểm tra OpenCV.")
+            exit_code = 1
+
+    return exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
