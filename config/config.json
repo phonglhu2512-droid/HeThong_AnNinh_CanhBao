@@ -1,0 +1,20 @@
+{
+  "video_source": {
+    "mode": "webcam",
+    "device_id": 0,
+    "file_path": "",
+    "rtsp_url": "",
+    "port": 554,
+    "username": "",
+    "password": "",
+    "profile": "ONVIF"
+  },
+  "roi_points": [
+    [160, 120],
+    [480, 120],
+    [480, 320],
+    [160, 320]
+  ],
+  "min_area": 1500,
+  "violation_delay": 0.8
+}
