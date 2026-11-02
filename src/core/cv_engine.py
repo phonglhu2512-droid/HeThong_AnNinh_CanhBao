@@ -50,6 +50,9 @@ class CVProcessor:
     ILLUMINATION_THRESHOLD: float = 0.60
     CANNY_THRESHOLDS: tuple[int, int] = (50, 150)
     MORPH_KERNEL_SIZE: tuple[int, int] = (3, 3)
+    LARGE_MOTION_THRESHOLD: float = 0.10
+    PROTECTED_LEARNING_RATE: float = 0.0005
+    FLOOR_OVERLAY_ALPHA: float = 0.18
 
     def __init__(
         self,
@@ -77,6 +80,7 @@ class CVProcessor:
             cv2.MORPH_RECT, self.MORPH_KERNEL_SIZE
         )
         self._background_subtractor = self._create_background_subtractor()
+        self._protect_background: bool = False
 
     @staticmethod
     def _validate_min_area(min_area: float) -> float:
@@ -210,17 +214,20 @@ class CVProcessor:
         """
         with self._lock:
             self._background_subtractor = self._create_background_subtractor()
+            self._protect_background = False
 
     def process_frame(
         self,
         frame: np.ndarray,
         display_mode: DisplayMode | str | None = None,
+        roi_points: list[tuple[int, int]] | None = None,
     ) -> FrameAnalysis:
         """Phân tích chuyển động, lọc bóng và trả ảnh ở cả ba chế độ xem.
 
         Args:
             frame: Frame BGR đầu vào từ StreamManager.
             display_mode: Chế độ hiển thị tùy chọn; None dùng chế độ hiện hành.
+            roi_points: Đa giác ROI theo hệ tọa độ frame 640×360.
 
         Returns:
             FrameAnalysis chứa RGB, mặt nạ MOG2, Canny, detections và cờ sốc sáng.
@@ -244,7 +251,15 @@ class CVProcessor:
             rgb_frame = cv2.resize(frame, self.FRAME_SIZE)
             gray_frame = cv2.cvtColor(rgb_frame, cv2.COLOR_BGR2GRAY)
             blurred_frame = cv2.GaussianBlur(gray_frame, (5, 5), 0)
-            mog2_frame = self._background_subtractor.apply(blurred_frame)
+            learning_rate = (
+                self.PROTECTED_LEARNING_RATE
+                if self._protect_background
+                else -1.0
+            )
+            mog2_frame = self._background_subtractor.apply(
+                blurred_frame,
+                learningRate=learning_rate,
+            )
 
             object_mask = cv2.inRange(mog2_frame, 255, 255)
             total_pixels = object_mask.size
@@ -262,6 +277,7 @@ class CVProcessor:
                     learningRate=1.0,
                 )
                 detections: tuple[Detection, ...] = ()
+                self._protect_background = False
             else:
                 opened_mask = cv2.morphologyEx(
                     object_mask, cv2.MORPH_OPEN, self._morph_kernel
@@ -275,6 +291,14 @@ class CVProcessor:
                     cv2.CHAIN_APPROX_SIMPLE,
                 )
                 detections = self._extract_detections(contours, min_area)
+                person_in_roi = self._has_detection_in_roi(
+                    detections,
+                    roi_points,
+                )
+                self._protect_background = (
+                    white_pixel_ratio >= self.LARGE_MOTION_THRESHOLD
+                    or person_in_roi
+                )
 
             canny_frame = cv2.Canny(
                 blurred_frame,
@@ -298,6 +322,99 @@ class CVProcessor:
             illumination_shift=illumination_shift,
             skip_safety_evaluation=illumination_shift,
         )
+
+    @staticmethod
+    def _has_detection_in_roi(
+        detections: tuple[Detection, ...],
+        roi_points: list[tuple[int, int]] | None,
+    ) -> bool:
+        """Kiểm tra có điểm chân phát hiện nào nằm trong ROI để giữ nền.
+
+        Args:
+            detections: Các đối tượng vừa trích xuất từ mask MOG2.
+            roi_points: Đa giác ROI theo hệ tọa độ frame chuẩn 640×360.
+
+        Returns:
+            True khi điểm chân của ít nhất một đối tượng nằm trong ROI.
+        """
+        if not roi_points or len(roi_points) < 3:
+            return False
+        polygon = np.asarray(roi_points, dtype=np.int32).reshape((-1, 1, 2))
+        return any(
+            cv2.pointPolygonTest(
+                polygon,
+                (float(detection.foot_point[0]), float(detection.foot_point[1])),
+                False,
+            )
+            >= 0
+            for detection in detections
+        )
+
+    @classmethod
+    def blend_floor_roi(
+        cls,
+        frame: np.ndarray,
+        roi_points: list[tuple[int, int]],
+        occlusion_polygons: list[list[tuple[int, int]]],
+        color: tuple[int, int, int],
+        foreground_mask: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Trộn ROI bán trong suốt trên sàn và loại trừ vùng máy bị che khuất.
+
+        Args:
+            frame: Frame BGR chuẩn 640×360 cần vẽ lớp ROI.
+            roi_points: Đa giác vùng sàn theo hệ tọa độ frame.
+            occlusion_polygons: Các vùng thân máy không được phủ màu ROI.
+            color: Màu BGR theo trạng thái an toàn hiện hành.
+            foreground_mask: Mask MOG2 để giữ lớp ROI phía sau vật thể chuyển động.
+
+        Returns:
+            Frame mới có lớp ROI alpha-blend, không làm thay đổi frame đầu vào.
+
+        Raises:
+            ValueError: Khi foreground_mask không cùng kích thước với frame.
+        """
+        if len(roi_points) < 3:
+            return frame.copy()
+
+        height, width = frame.shape[:2]
+        roi = np.asarray(roi_points, dtype=np.int32).reshape((-1, 1, 2))
+        overlay = frame.copy()
+        cv2.fillPoly(overlay, [roi], color)
+        cv2.polylines(
+            overlay,
+            [roi],
+            isClosed=True,
+            color=color,
+            thickness=2,
+            lineType=cv2.LINE_AA,
+        )
+
+        visible_floor = np.zeros((height, width), dtype=np.uint8)
+        cv2.fillPoly(visible_floor, [roi], 255)
+        if foreground_mask is not None:
+            if foreground_mask.shape != (height, width):
+                raise ValueError(
+                    "foreground_mask phải cùng kích thước với frame."
+                )
+            visible_floor[foreground_mask == 255] = 0
+        for polygon_points in occlusion_polygons:
+            if len(polygon_points) >= 3:
+                polygon = np.asarray(polygon_points, dtype=np.int32).reshape(
+                    (-1, 1, 2)
+                )
+                cv2.fillPoly(visible_floor, [polygon], 0)
+
+        blended = cv2.addWeighted(
+            overlay,
+            cls.FLOOR_OVERLAY_ALPHA,
+            frame,
+            1.0 - cls.FLOOR_OVERLAY_ALPHA,
+            0,
+        )
+        result = frame.copy()
+        result[visible_floor > 0] = blended[visible_floor > 0]
+        return result
 
     @staticmethod
     def _validate_frame(frame: np.ndarray) -> None:

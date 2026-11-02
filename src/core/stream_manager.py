@@ -47,6 +47,85 @@ class StreamManager:
     JOIN_TIMEOUT_SECONDS: float = 1.0
     SIGNAL_LOST_MESSAGE: str = "MẤT TÍN HIỆU - ĐANG KẾT NỐI LẠI..."
 
+    def scan_available_webcams(self, max_index: int = 5) -> list[int]:
+        """Dò webcam; tạm nhả webcam đang chạy rồi khôi phục luồng sau khi quét.
+
+        Args:
+            max_index: Cận trên không bao gồm của dải ID webcam cần thử.
+
+        Returns:
+            Danh sách ID webcam mở được và đọc thành công ít nhất một frame.
+
+        Raises:
+            TypeError: Khi max_index không phải số nguyên.
+            ValueError: Khi max_index âm.
+            RuntimeError: Khi luồng webcam đang chạy không thể dừng an toàn.
+        """
+        if isinstance(max_index, bool) or not isinstance(max_index, int):
+            raise TypeError("max_index phải là số nguyên.")
+        if max_index < 0:
+            raise ValueError("max_index không được âm.")
+
+        with self._lifecycle_lock:
+            active_source = self.source
+            resume_webcam = self.is_running and isinstance(active_source, int)
+            if resume_webcam:
+                self.stop_stream()
+            try:
+                return self._probe_available_webcams(max_index)
+            finally:
+                if resume_webcam:
+                    self.start_stream(active_source)
+
+    @staticmethod
+    def _probe_available_webcams(max_index: int) -> list[int]:
+        """Mở tạm từng webcam, thử frame rồi giải phóng capture ngay.
+
+        Args:
+            max_index: Cận trên không bao gồm của dải ID webcam cần thử.
+
+        Returns:
+            Danh sách ID webcam đọc được frame thử.
+        """
+        available: list[int] = []
+        for device_id in range(max_index):
+            backends: tuple[int | None, ...] = (
+                (cv2.CAP_DSHOW, None)
+                if sys.platform == "win32"
+                else (None,)
+            )
+            for backend in backends:
+                capture: cv2.VideoCapture | None = None
+                try:
+                    capture = (
+                        cv2.VideoCapture(device_id, backend)
+                        if backend is not None
+                        else cv2.VideoCapture(device_id)
+                    )
+                    if capture.isOpened():
+                        success, frame = capture.read()
+                        if success and frame is not None:
+                            available.append(device_id)
+                            break
+                except cv2.error:
+                    LOGGER.debug(
+                        "Không thể kiểm tra webcam %s bằng backend %s.",
+                        device_id,
+                        backend,
+                        exc_info=True,
+                    )
+                finally:
+                    if capture is not None:
+                        try:
+                            capture.release()
+                        except cv2.error:
+                            LOGGER.warning(
+                                "Không thể giải phóng webcam %s sau khi dò.",
+                                device_id,
+                                exc_info=True,
+                            )
+        return available
+
     def __init__(
         self,
         source: VideoSource = 0,

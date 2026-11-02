@@ -73,6 +73,7 @@ class ConfigManager:
             },
             # Đa giác mẫu theo hệ tọa độ 640x360, có thể hiệu chuẩn lại trên HMI.
             "roi_points": [[160, 120], [480, 120], [480, 320], [160, 320]],
+            "occlusion_polygons": [],
             "min_area": 1500,
             "violation_delay": 0.8,
         }
@@ -135,6 +136,35 @@ class ConfigManager:
                 )
             ):
                 raise ValueError("Mỗi đỉnh ROI phải có dạng [x, y] là số.")
+            if any(
+                not math.isfinite(coordinate)
+                or not 0 <= coordinate <= limit
+                for coordinate, limit in zip(point, (640, 360))
+            ):
+                raise ValueError(
+                    "Tọa độ ROI phải nằm trong hệ frame 640x360."
+                )
+
+        occlusion_polygons = config.get("occlusion_polygons", [])
+        if not isinstance(occlusion_polygons, list):
+            raise ValueError("'occlusion_polygons' phải là danh sách đa giác.")
+        for polygon in occlusion_polygons:
+            if not isinstance(polygon, list) or len(polygon) < 3:
+                raise ValueError("Mỗi vùng che khuất cần tối thiểu 3 đỉnh.")
+            for point in polygon:
+                if (
+                    not isinstance(point, list)
+                    or len(point) != 2
+                    or any(
+                        isinstance(coordinate, bool)
+                        or not isinstance(coordinate, int)
+                        or not 0 <= coordinate < limit
+                        for coordinate, limit in zip(point, (640, 360))
+                    )
+                ):
+                    raise ValueError(
+                        "Đỉnh vùng che khuất phải là [x, y] nguyên trong frame 640x360."
+                    )
 
         min_area = config.get("min_area")
         if isinstance(min_area, bool) or not isinstance(min_area, (int, float)):

@@ -15,7 +15,15 @@ from urllib.parse import quote, urlsplit, urlunsplit
 import cv2
 import numpy as np
 from PyQt6.QtCore import QPointF, QRectF, QTime, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QCloseEvent, QColor, QImage, QPainter, QPen, QPixmap
+from PyQt6.QtGui import (
+    QCloseEvent,
+    QColor,
+    QImage,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+)
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -65,6 +73,7 @@ class VideoCanvas(QWidget):
     """Vẽ video đúng tỷ lệ và đổi vị trí click chuột sang tọa độ frame."""
 
     roi_point_added = pyqtSignal(int, int)
+    occlusion_point_added = pyqtSignal(int, int)
 
     FRAME_WIDTH: int = 640
     FRAME_HEIGHT: int = 360
@@ -83,6 +92,9 @@ class VideoCanvas(QWidget):
         self._image: QImage | None = None
         self._roi_points: list[ROIPoint] = []
         self._editing_roi: bool = False
+        self._occlusion_polygons: list[list[ROIPoint]] = []
+        self._draft_occlusion_points: list[ROIPoint] = []
+        self._editing_occlusion: bool = False
         self.setMinimumSize(640, 360)
         self.setMouseTracking(True)
 
@@ -117,20 +129,33 @@ class VideoCanvas(QWidget):
         self,
         points: list[ROIPoint],
         editing: bool,
+        occlusion_polygons: list[list[ROIPoint]] | None = None,
+        draft_occlusion_points: list[ROIPoint] | None = None,
+        editing_occlusion: bool = False,
     ) -> None:
-        """Cập nhật lớp phủ ROI và trạng thái cho phép click vẽ đỉnh.
+        """Cập nhật ROI, vùng che khuất và chế độ hiệu chuẩn đang hoạt động.
 
         Args:
             points: Các đỉnh ROI đã lưu hoặc các điểm đang vẽ.
             editing: True khi click trái được dùng để thêm đỉnh ROI.
+            occlusion_polygons: Các đa giác thân máy che lớp ROI mặt sàn.
+            draft_occlusion_points: Đa giác che khuất đang được hiệu chuẩn.
+            editing_occlusion: True khi click trái thêm đỉnh vùng che khuất.
 
         Returns:
             None.
         """
         self._roi_points = list(points)
         self._editing_roi = editing
+        self._occlusion_polygons = [
+            list(polygon) for polygon in (occlusion_polygons or [])
+        ]
+        self._draft_occlusion_points = list(draft_occlusion_points or [])
+        self._editing_occlusion = editing_occlusion
         self.setCursor(
-            Qt.CursorShape.CrossCursor if editing else Qt.CursorShape.ArrowCursor
+            Qt.CursorShape.CrossCursor
+            if editing or editing_occlusion
+            else Qt.CursorShape.ArrowCursor
         )
         self.update()
 
@@ -183,29 +208,97 @@ class VideoCanvas(QWidget):
 
         image_rect = self._image_rect()
         painter.drawImage(image_rect, self._image)
-        if not self._roi_points:
+        if not (
+            self._roi_points
+            and (self._editing_roi or self._editing_occlusion)
+        ):
             return
 
-        scaled_points = [
-            QPointF(
-                image_rect.x() + point[0] * image_rect.width() / self.FRAME_WIDTH,
-                image_rect.y() + point[1] * image_rect.height() / self.FRAME_HEIGHT,
-            )
-            for point in self._roi_points
-        ]
-        roi_color = QColor("#F59E0B") if self._editing_roi else QColor("#28B4A7")
-        pen = QPen(roi_color, 2.0, Qt.PenStyle.DashLine)
-        painter.setPen(pen)
-        if len(scaled_points) >= 2:
-            for index in range(len(scaled_points) - 1):
-                painter.drawLine(scaled_points[index], scaled_points[index + 1])
-            if not self._editing_roi and len(scaled_points) >= 3:
-                painter.drawLine(scaled_points[-1], scaled_points[0])
+        if self._editing_roi:
+            scaled_points = [
+                QPointF(
+                    image_rect.x()
+                    + point[0] * image_rect.width() / self.FRAME_WIDTH,
+                    image_rect.y()
+                    + point[1] * image_rect.height() / self.FRAME_HEIGHT,
+                )
+                for point in self._roi_points
+            ]
+            clip_path = QPainterPath()
+            clip_path.addRect(image_rect)
+            for polygon in self._occlusion_polygons:
+                if len(polygon) < 3:
+                    continue
+                mask_path = QPainterPath()
+                mask_points = [
+                    QPointF(
+                        image_rect.x()
+                        + point[0] * image_rect.width() / self.FRAME_WIDTH,
+                        image_rect.y()
+                        + point[1] * image_rect.height() / self.FRAME_HEIGHT,
+                    )
+                    for point in polygon
+                ]
+                mask_path.moveTo(mask_points[0])
+                for point in mask_points[1:]:
+                    mask_path.lineTo(point)
+                mask_path.closeSubpath()
+                clip_path = clip_path.subtracted(mask_path)
 
-        painter.setBrush(roi_color)
-        painter.setPen(Qt.PenStyle.NoPen)
-        for point in scaled_points:
-            painter.drawEllipse(point, 4.0, 4.0)
+            painter.save()
+            painter.setClipPath(clip_path, Qt.ClipOperation.IntersectClip)
+            roi_color = QColor("#F59E0B")
+            pen = QPen(roi_color, 2.0, Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            if len(scaled_points) >= 2:
+                for index in range(len(scaled_points) - 1):
+                    painter.drawLine(
+                        scaled_points[index],
+                        scaled_points[index + 1],
+                    )
+
+            painter.setBrush(roi_color)
+            painter.setPen(Qt.PenStyle.NoPen)
+            for point in scaled_points:
+                painter.drawEllipse(point, 4.0, 4.0)
+            painter.restore()
+
+        if self._editing_roi or self._editing_occlusion:
+            for polygon in self._occlusion_polygons:
+                if len(polygon) < 3:
+                    continue
+                mask_points = [
+                    QPointF(
+                        image_rect.x()
+                        + point[0] * image_rect.width() / self.FRAME_WIDTH,
+                        image_rect.y()
+                        + point[1] * image_rect.height() / self.FRAME_HEIGHT,
+                    )
+                    for point in polygon
+                ]
+                painter.setBrush(QColor(168, 85, 247, 45))
+                painter.setPen(
+                    QPen(QColor("#A855F7"), 1.5, Qt.PenStyle.DashLine)
+                )
+                painter.drawPolygon(*mask_points)
+
+        if self._editing_occlusion and self._draft_occlusion_points:
+            draft_points = [
+                QPointF(
+                    image_rect.x()
+                    + point[0] * image_rect.width() / self.FRAME_WIDTH,
+                    image_rect.y()
+                    + point[1] * image_rect.height() / self.FRAME_HEIGHT,
+                )
+                for point in self._draft_occlusion_points
+            ]
+            painter.setPen(QPen(QColor("#F59E0B"), 2.0, Qt.PenStyle.DashLine))
+            for index in range(len(draft_points) - 1):
+                painter.drawLine(draft_points[index], draft_points[index + 1])
+            painter.setBrush(QColor("#F59E0B"))
+            painter.setPen(Qt.PenStyle.NoPen)
+            for point in draft_points:
+                painter.drawEllipse(point, 4.0, 4.0)
 
     def mousePressEvent(self, event: object) -> None:
         """Phát tọa độ click hợp lệ trong frame khi đang hiệu chuẩn ROI.
@@ -217,7 +310,7 @@ class VideoCanvas(QWidget):
             None.
         """
         if (
-            self._editing_roi
+            (self._editing_roi or self._editing_occlusion)
             and event.button() == Qt.MouseButton.LeftButton
         ):
             image_rect = self._image_rect()
@@ -235,7 +328,12 @@ class VideoCanvas(QWidget):
                 )
                 frame_x = min(max(frame_x, 0), self.FRAME_WIDTH - 1)
                 frame_y = min(max(frame_y, 0), self.FRAME_HEIGHT - 1)
-                self.roi_point_added.emit(frame_x, frame_y)
+                signal = (
+                    self.occlusion_point_added
+                    if self._editing_occlusion
+                    else self.roi_point_added
+                )
+                signal.emit(frame_x, frame_y)
                 event.accept()
                 return
         super().mousePressEvent(event)
@@ -251,6 +349,7 @@ class _CVSafetyWorker(threading.Thread):
         safety_controller: SafetyController,
         audit_logger: AuditLogger,
         roi_points: list[ROIPoint],
+        occlusion_polygons: list[list[ROIPoint]],
     ) -> None:
         """Khởi tạo worker xử lý frame và các phụ thuộc module dùng chung.
 
@@ -272,6 +371,9 @@ class _CVSafetyWorker(threading.Thread):
         self._stop_event = threading.Event()
         self._state_lock = threading.RLock()
         self._roi_points = list(roi_points)
+        self._occlusion_polygons = [
+            list(polygon) for polygon in occlusion_polygons
+        ]
         self._display_mode = DisplayMode.RGB
         self._result_queue: queue.Queue[RenderPacket] = queue.Queue(maxsize=1)
         self._source_queue: queue.Queue[VideoSource] = queue.Queue(maxsize=1)
@@ -303,6 +405,23 @@ class _CVSafetyWorker(threading.Thread):
         """
         with self._state_lock:
             self._roi_points = list(points)
+
+    def set_occlusion_polygons(
+        self,
+        polygons: list[list[ROIPoint]],
+    ) -> None:
+        """Cập nhật các vùng thân máy cần loại khỏi lớp phủ ROI.
+
+        Args:
+            polygons: Các đa giác che khuất theo hệ tọa độ 640×360.
+
+        Returns:
+            None.
+        """
+        with self._state_lock:
+            self._occlusion_polygons = [
+                list(polygon) for polygon in polygons
+            ]
 
     def set_display_mode(self, mode: DisplayMode) -> None:
         """Đặt chế độ xem áp dụng trên frame tiếp theo.
@@ -381,11 +500,15 @@ class _CVSafetyWorker(threading.Thread):
                     continue
                 with self._state_lock:
                     roi_points = list(self._roi_points)
+                    occlusion_polygons = [
+                        list(polygon) for polygon in self._occlusion_polygons
+                    ]
                     display_mode = self._display_mode
 
                 analysis = self._cv_processor.process_frame(
                     frame,
                     display_mode=display_mode,
+                    roi_points=roi_points,
                 )
                 foot_point, _ = self._select_detection(
                     analysis,
@@ -409,12 +532,14 @@ class _CVSafetyWorker(threading.Thread):
                     roi_points,
                     safety,
                     self._last_fps,
+                    occlusion_polygons=occlusion_polygons,
                 )
                 self._record_alarm_transition(
                     analysis,
                     safety,
                     foot_point,
                     roi_points,
+                    occlusion_polygons,
                 )
                 self._publish_result(
                     RenderPacket(
@@ -496,6 +621,7 @@ class _CVSafetyWorker(threading.Thread):
         safety: SafetyResult,
         fps: float,
         base_frame: np.ndarray | None = None,
+        occlusion_polygons: list[list[ROIPoint]] | None = None,
     ) -> np.ndarray:
         """Vẽ ROI, bounding box, foot-point và chỉ số HMI lên frame.
 
@@ -505,6 +631,7 @@ class _CVSafetyWorker(threading.Thread):
             safety: Trạng thái an toàn quyết định màu viền vùng cấm.
             fps: FPS worker tính từ thời gian xử lý frame.
             base_frame: Ảnh nguồn tùy chọn; None dùng chế độ hiển thị đang chọn.
+            occlusion_polygons: Các vùng thân máy không phủ màu ROI.
 
         Returns:
             Bản sao frame BGR có lớp phủ phục vụ HMI và lưu bằng chứng.
@@ -519,15 +646,13 @@ class _CVSafetyWorker(threading.Thread):
             SafetyState.WARNING: (0, 190, 245),
             SafetyState.ALARM: (30, 30, 240),
         }
-        roi_array = np.asarray(roi_points, dtype=np.int32).reshape((-1, 1, 2))
         if len(roi_points) >= 3:
-            cv2.polylines(
+            rendered = CVProcessor.blend_floor_roi(
                 rendered,
-                [roi_array],
-                isClosed=True,
-                color=colors[safety.state],
-                thickness=2,
-                lineType=cv2.LINE_AA,
+                roi_points,
+                occlusion_polygons or [],
+                colors[safety.state],
+                foreground_mask=analysis.mog2_frame,
             )
 
         for detection in analysis.detections:
@@ -562,6 +687,7 @@ class _CVSafetyWorker(threading.Thread):
         safety: SafetyResult,
         foot_point: ROIPoint | None,
         roi_points: list[ROIPoint],
+        occlusion_polygons: list[list[ROIPoint]],
     ) -> None:
         """Lưu snapshot một lần khi latch mới bật và chốt thời lượng khi ra ROI.
 
@@ -597,6 +723,7 @@ class _CVSafetyWorker(threading.Thread):
                         safety,
                         self._last_fps,
                         base_frame=analysis.rgb_frame,
+                        occlusion_polygons=occlusion_polygons,
                     )
                     event = self._audit_logger.log_violation(
                         evidence_frame,
@@ -706,6 +833,8 @@ class SnapshotPreviewDialog(QDialog):
 class HMIMainWindow(QMainWindow):
     """Cửa sổ HMI chính kết nối stream, vision, safety, config và audit."""
 
+    webcams_scanned = pyqtSignal(list, str)
+
     def __init__(
         self,
         config_manager: ConfigManager,
@@ -737,7 +866,18 @@ class HMIMainWindow(QMainWindow):
             (int(point[0]), int(point[1]))
             for point in self._config["roi_points"]
         ]
+        self._occlusion_polygons: list[list[ROIPoint]] = [
+            [
+                (int(point[0]), int(point[1]))
+                for point in polygon
+            ]
+            for polygon in self._config.get("occlusion_polygons", [])
+        ]
         self._draft_roi_points: list[ROIPoint] = []
+        self._draft_occlusion_points: list[ROIPoint] = []
+        self._editing_occlusion = False
+        self._webcam_scan_running = False
+        self._pending_auto_source_switch = False
         self._setup_mode = False
         self._filtered_events: list[AuditEvent] = audit_logger.get_events()
         self._carousel_fingerprint: tuple[tuple[str, bool, float], ...] = ()
@@ -747,6 +887,7 @@ class HMIMainWindow(QMainWindow):
         self.setWindowTitle("VisionGuard AI | Industrial Safety HMI")
         self.resize(1500, 940)
         self.setMinimumSize(1120, 760)
+        self.webcams_scanned.connect(self._on_webcams_scanned)
         self._build_ui()
         self._apply_styles()
         self._load_source_form()
@@ -757,6 +898,7 @@ class HMIMainWindow(QMainWindow):
             safety_controller,
             audit_logger,
             self._roi_points,
+            self._occlusion_polygons,
         )
         self._worker.start()
         self._ui_timer = QTimer(self)
@@ -874,6 +1016,7 @@ class HMIMainWindow(QMainWindow):
         self._canvas = VideoCanvas()
         self._canvas.setObjectName("videoCanvas")
         self._canvas.roi_point_added.connect(self._add_roi_point)
+        self._canvas.occlusion_point_added.connect(self._add_occlusion_point)
         video_layout.addWidget(self._canvas, 1)
         self._roi_controls = self._build_roi_controls()
         video_layout.addWidget(self._roi_controls)
@@ -899,15 +1042,28 @@ class HMIMainWindow(QMainWindow):
         self._undo_roi_button = QPushButton("Undo đỉnh")
         self._reset_roi_button = QPushButton("Reset ROI")
         self._save_roi_button = QPushButton("Lưu vùng ROI")
+        self._draw_occlusion_button = QPushButton("Vẽ vùng che máy")
+        self._undo_occlusion_button = QPushButton("Undo mask")
+        self._save_occlusion_button = QPushButton("Lưu mask")
+        self._clear_occlusion_button = QPushButton("Xóa mask")
         self._save_roi_button.setObjectName("primaryButton")
+        self._save_occlusion_button.setObjectName("primaryButton")
         self._undo_roi_button.clicked.connect(self._undo_roi_point)
         self._reset_roi_button.clicked.connect(self._reset_roi_draft)
         self._save_roi_button.clicked.connect(self._save_roi)
+        self._draw_occlusion_button.clicked.connect(self._start_occlusion_draft)
+        self._undo_occlusion_button.clicked.connect(self._undo_occlusion_point)
+        self._save_occlusion_button.clicked.connect(self._save_occlusion_polygon)
+        self._clear_occlusion_button.clicked.connect(self._clear_occlusion_polygons)
         layout.addWidget(QLabel("HIỆU CHUẨN ROI"))
         layout.addStretch(1)
         layout.addWidget(self._undo_roi_button)
         layout.addWidget(self._reset_roi_button)
         layout.addWidget(self._save_roi_button)
+        layout.addWidget(self._draw_occlusion_button)
+        layout.addWidget(self._undo_occlusion_button)
+        layout.addWidget(self._save_occlusion_button)
+        layout.addWidget(self._clear_occlusion_button)
         return controls
 
     def _build_side_panel(self) -> QWidget:
@@ -955,6 +1111,27 @@ class HMIMainWindow(QMainWindow):
         )
         self._source_combo.currentIndexChanged.connect(self._on_source_mode_changed)
         layout.addWidget(self._source_combo)
+
+        self._webcam_device_combo = QComboBox()
+        self._webcam_device_combo.addItem("Tự động dò (Auto)", "auto")
+        configured_device = self._config.get("video_source", {}).get(
+            "device_id", 0
+        )
+        if isinstance(configured_device, int) and not isinstance(
+            configured_device, bool
+        ):
+            self._webcam_device_combo.addItem(
+                f"Webcam {configured_device}",
+                configured_device,
+            )
+        self._scan_webcams_button = QPushButton("Dò webcam")
+        self._scan_webcams_button.clicked.connect(self._request_webcam_scan)
+        self._webcam_source_group = QWidget()
+        webcam_row = QHBoxLayout(self._webcam_source_group)
+        webcam_row.setContentsMargins(0, 0, 0, 0)
+        webcam_row.addWidget(self._webcam_device_combo, 1)
+        webcam_row.addWidget(self._scan_webcams_button)
+        layout.addWidget(self._webcam_source_group)
 
         self._file_path_edit = QLineEdit()
         self._file_path_edit.setPlaceholderText("Chọn video .mp4 hoặc .avi")
@@ -1265,6 +1442,10 @@ class HMIMainWindow(QMainWindow):
         mode = source_config.get("mode", "webcam")
         mode_index = {"webcam": 0, "file": 1, "rtsp": 2}.get(mode, 0)
         self._source_combo.setCurrentIndex(mode_index)
+        device_id = source_config.get("device_id", 0)
+        device_index = self._webcam_device_combo.findData(device_id)
+        if device_index >= 0:
+            self._webcam_device_combo.setCurrentIndex(device_index)
         self._file_path_edit.setText(source_config.get("file_path", ""))
         self._rtsp_url_edit.setText(source_config.get("rtsp_url", ""))
         self._rtsp_port_edit.setText(str(source_config.get("port", 554)))
@@ -1276,6 +1457,143 @@ class HMIMainWindow(QMainWindow):
             self._rtsp_profile_combo.setCurrentIndex(profile_index)
         self._on_source_mode_changed()
 
+    def _request_webcam_scan(self, checked: bool = False) -> None:
+        """Khởi chạy dò webcam ở worker để không chặn luồng giao diện.
+
+        Args:
+            checked: Trạng thái nút gửi bởi tín hiệu clicked của Qt.
+
+        Returns:
+            None.
+        """
+        del checked
+        self._begin_webcam_scan(auto_switch=False)
+
+    def _begin_webcam_scan(self, auto_switch: bool) -> None:
+        """Bắt đầu quét camera và ghi nhớ nếu kết quả cần áp dụng nguồn Auto.
+
+        Args:
+            auto_switch: Tự áp dụng webcam khả dụng đầu tiên sau khi quét.
+
+        Returns:
+            None.
+        """
+        self._pending_auto_source_switch = auto_switch
+        if self._webcam_scan_running:
+            return
+        self._webcam_scan_running = True
+        self._scan_webcams_button.setEnabled(False)
+        self._system_status.setText("ĐANG DÒ WEBCAM…")
+        scan_thread = threading.Thread(
+            target=self._scan_webcams_in_background,
+            name="VisionGuard-WebcamScan",
+            daemon=True,
+        )
+        scan_thread.start()
+
+    def _scan_webcams_in_background(self) -> None:
+        """Dò webcam ngoài GUI và gửi kết quả qua Qt signal an toàn luồng.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+        """
+        try:
+            devices = self._stream_manager.scan_available_webcams(max_index=5)
+        except Exception as error:
+            LOGGER.exception("Không thể dò các webcam khả dụng.")
+            self.webcams_scanned.emit([], str(error))
+            return
+        self.webcams_scanned.emit(devices, "")
+
+    def _on_webcams_scanned(
+        self,
+        devices: list[int],
+        error_message: str,
+    ) -> None:
+        """Đưa camera đã dò vào dropdown và xử lý yêu cầu Auto đang chờ.
+
+        Args:
+            devices: Các ID camera mở và đọc được frame thử.
+            error_message: Lỗi nghiêm trọng khi quá trình quét không chạy được.
+
+        Returns:
+            None.
+        """
+        self._webcam_scan_running = False
+        self._scan_webcams_button.setEnabled(self._setup_mode)
+        selected_device = self._webcam_device_combo.currentData()
+        self._webcam_device_combo.clear()
+        self._webcam_device_combo.addItem("Tự động dò (Auto)", "auto")
+        for device_id in devices:
+            self._webcam_device_combo.addItem(
+                f"Webcam {device_id}",
+                device_id,
+            )
+        selected_index = self._webcam_device_combo.findData(selected_device)
+        self._webcam_device_combo.setCurrentIndex(
+            selected_index if selected_index >= 0 else 0
+        )
+
+        should_auto_switch = self._pending_auto_source_switch
+        self._pending_auto_source_switch = False
+        if error_message:
+            QMessageBox.warning(
+                self,
+                "Không thể dò webcam",
+                f"Quá trình dò camera thất bại:\n{error_message}",
+            )
+            return
+        if not devices:
+            if should_auto_switch:
+                QMessageBox.warning(
+                    self,
+                    "Không tìm thấy webcam",
+                    "Không có webcam nào mở được và đọc được frame.",
+                )
+            else:
+                self._system_status.setText("KHÔNG TÌM THẤY WEBCAM")
+            return
+
+        self._system_status.setText(
+            f"ĐÃ DÒ THẤY {len(devices)} WEBCAM"
+        )
+        if should_auto_switch:
+            selected_index = self._webcam_device_combo.findData(devices[0])
+            if selected_index >= 0:
+                self._webcam_device_combo.setCurrentIndex(selected_index)
+            self._apply_webcam_source(devices[0])
+
+    def _apply_webcam_source(self, device_id: int) -> None:
+        """Lưu và chuyển sang webcam đã chọn mà không chặn luồng GUI.
+
+        Args:
+            device_id: ID webcam đã chọn hoặc tìm thấy bằng chế độ Auto.
+
+        Returns:
+            None.
+        """
+        source_config = dict(self._config.get("video_source", {}))
+        source_config.update({"mode": "webcam", "device_id": device_id})
+        try:
+            self._config = self._config_manager.update_config(
+                {"video_source": source_config}
+            )
+            self._worker.request_source_switch(device_id)
+        except Exception as error:
+            LOGGER.exception("Không thể áp dụng webcam %s.", device_id)
+            QMessageBox.critical(
+                self,
+                "Không thể chuyển webcam",
+                f"Không lưu hoặc gửi được cấu hình webcam:\n{error}",
+            )
+            return
+        self._system_status.setText(
+            f"ĐANG CHUYỂN SANG WEBCAM {device_id}…"
+        )
+
     def _on_mode_changed(self, index: int) -> None:
         """Chuyển giao diện giữa thao tác vận hành và cài đặt kỹ thuật.
 
@@ -1286,13 +1604,13 @@ class HMIMainWindow(QMainWindow):
             None.
         """
         self._setup_mode = index == 1
-        self._canvas.set_roi_overlay(
-            self._draft_roi_points if self._setup_mode else self._roi_points,
-            self._setup_mode,
-        )
+        if not self._setup_mode:
+            self._editing_occlusion = False
+        self._refresh_canvas_overlay()
         for widget in (
             self._roi_controls,
             self._source_combo,
+            self._webcam_source_group,
             self._file_source_group,
             self._rtsp_source_group,
             self._apply_source_button,
@@ -1305,6 +1623,30 @@ class HMIMainWindow(QMainWindow):
             "ROI: ĐANG HIỆU CHUẨN" if self._setup_mode else "ROI: ĐÃ LƯU"
         )
 
+    def _refresh_canvas_overlay(self) -> None:
+        """Đồng bộ ROI và các vùng che khuất lên canvas hiển thị.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+        """
+        roi_points = (
+            self._draft_roi_points if self._setup_mode else self._roi_points
+        )
+        self._canvas.set_roi_overlay(
+            roi_points,
+            editing=self._setup_mode and not self._editing_occlusion,
+            occlusion_polygons=self._occlusion_polygons,
+            draft_occlusion_points=(
+                self._draft_occlusion_points
+                if self._setup_mode
+                else []
+            ),
+            editing_occlusion=self._setup_mode and self._editing_occlusion,
+        )
+
     def _on_source_mode_changed(self) -> None:
         """Chỉ bật trường cấu hình phù hợp với nguồn video được chọn.
 
@@ -1315,8 +1657,13 @@ class HMIMainWindow(QMainWindow):
             None.
         """
         mode_index = self._source_combo.currentIndex()
+        self._webcam_source_group.setVisible(mode_index == 0)
         self._file_source_group.setVisible(mode_index == 1)
         self._rtsp_source_group.setVisible(mode_index == 2)
+        self._webcam_device_combo.setEnabled(self._setup_mode)
+        self._scan_webcams_button.setEnabled(
+            self._setup_mode and not self._webcam_scan_running
+        )
         self._apply_source_button.setEnabled(self._setup_mode)
 
     def _browse_video_file(self) -> None:
@@ -1421,8 +1768,21 @@ class HMIMainWindow(QMainWindow):
         mode_index = self._source_combo.currentIndex()
         source_config = dict(self._config.get("video_source", {}))
         if mode_index == 0:
-            source: VideoSource = 0
-            source_config.update({"mode": "webcam", "device_id": 0})
+            selected_device = self._webcam_device_combo.currentData()
+            if selected_device == "auto":
+                self._begin_webcam_scan(auto_switch=True)
+                return
+            if isinstance(selected_device, bool) or not isinstance(
+                selected_device, int
+            ):
+                QMessageBox.warning(
+                    self,
+                    "Webcam chưa hợp lệ",
+                    "Hãy chọn camera đã dò hoặc chế độ Tự động dò (Auto).",
+                )
+                return
+            self._apply_webcam_source(selected_device)
+            return
         elif mode_index == 1:
             file_path = self._file_path_edit.text().strip()
             if not file_path or Path(file_path).suffix.lower() not in {
@@ -1564,8 +1924,10 @@ class HMIMainWindow(QMainWindow):
         """
         if not self._setup_mode:
             return
+        if self._editing_occlusion:
+            return
         self._draft_roi_points.append((x, y))
-        self._canvas.set_roi_overlay(self._draft_roi_points, editing=True)
+        self._refresh_canvas_overlay()
         self._roi_hint.setText(f"ROI: {len(self._draft_roi_points)} ĐỈNH")
 
     def _undo_roi_point(self) -> None:
@@ -1579,7 +1941,7 @@ class HMIMainWindow(QMainWindow):
         """
         if self._draft_roi_points:
             self._draft_roi_points.pop()
-        self._canvas.set_roi_overlay(self._draft_roi_points, editing=True)
+        self._refresh_canvas_overlay()
         self._roi_hint.setText(f"ROI: {len(self._draft_roi_points)} ĐỈNH")
 
     def _reset_roi_draft(self) -> None:
@@ -1592,7 +1954,8 @@ class HMIMainWindow(QMainWindow):
             None.
         """
         self._draft_roi_points = list(self._roi_points)
-        self._canvas.set_roi_overlay(self._draft_roi_points, editing=True)
+        self._editing_occlusion = False
+        self._refresh_canvas_overlay()
         self._roi_hint.setText(f"ROI: {len(self._draft_roi_points)} ĐỈNH")
 
     def _save_roi(self) -> None:
@@ -1630,8 +1993,134 @@ class HMIMainWindow(QMainWindow):
 
         self._roi_points = list(self._draft_roi_points)
         self._worker.set_roi_points(self._roi_points)
-        self._canvas.set_roi_overlay(self._roi_points, editing=False)
+        self._refresh_canvas_overlay()
         self._roi_hint.setText(f"ROI: ĐÃ LƯU · {len(self._roi_points)} ĐỈNH")
+
+    def _start_occlusion_draft(self) -> None:
+        """Bắt đầu vẽ đa giác loại trừ thân máy khỏi lớp phủ ROI.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+        """
+        if not self._setup_mode:
+            return
+        self._editing_occlusion = True
+        self._draft_occlusion_points = []
+        self._refresh_canvas_overlay()
+        self._roi_hint.setText("MASK MÁY: CHẤM TỐI THIỂU 3 ĐỈNH")
+
+    def _add_occlusion_point(self, x: int, y: int) -> None:
+        """Thêm một đỉnh che khuất đã quy đổi sang hệ tọa độ 640×360.
+
+        Args:
+            x: Tọa độ ngang trong frame chuẩn.
+            y: Tọa độ dọc trong frame chuẩn.
+
+        Returns:
+            None.
+        """
+        if not self._setup_mode or not self._editing_occlusion:
+            return
+        self._draft_occlusion_points.append((x, y))
+        self._refresh_canvas_overlay()
+        self._roi_hint.setText(
+            f"MASK MÁY: {len(self._draft_occlusion_points)} ĐỈNH"
+        )
+
+    def _undo_occlusion_point(self) -> None:
+        """Hoàn tác đỉnh gần nhất của vùng che khuất đang vẽ.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+        """
+        if self._draft_occlusion_points:
+            self._draft_occlusion_points.pop()
+        self._refresh_canvas_overlay()
+        self._roi_hint.setText(
+            f"MASK MÁY: {len(self._draft_occlusion_points)} ĐỈNH"
+        )
+
+    def _save_occlusion_polygon(self) -> None:
+        """Lưu vùng che khuất đã hiệu chuẩn vào cấu hình và worker CV.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+        """
+        if len(self._draft_occlusion_points) < 3:
+            QMessageBox.warning(
+                self,
+                "Vùng che khuất chưa hợp lệ",
+                "Đa giác vùng thân máy cần tối thiểu 3 đỉnh.",
+            )
+            return
+        polygons = [
+            [list(point) for point in polygon]
+            for polygon in self._occlusion_polygons
+        ]
+        polygons.append(
+            [list(point) for point in self._draft_occlusion_points]
+        )
+        try:
+            self._config = self._config_manager.update_config(
+                {"occlusion_polygons": polygons}
+            )
+        except (OSError, ValueError):
+            LOGGER.exception("Không thể lưu vùng che khuất.")
+            QMessageBox.critical(
+                self,
+                "Không thể lưu vùng che khuất",
+                "Đã xảy ra lỗi khi ghi vùng che khuất vào config.json.",
+            )
+            return
+
+        self._occlusion_polygons.append(
+            list(self._draft_occlusion_points)
+        )
+        self._draft_occlusion_points = []
+        self._editing_occlusion = False
+        self._worker.set_occlusion_polygons(self._occlusion_polygons)
+        self._refresh_canvas_overlay()
+        self._roi_hint.setText(
+            f"MASK MÁY: ĐÃ LƯU · {len(self._occlusion_polygons)} VÙNG"
+        )
+
+    def _clear_occlusion_polygons(self) -> None:
+        """Xóa toàn bộ vùng che khuất đã lưu khỏi cấu hình và lớp phủ.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+        """
+        try:
+            self._config = self._config_manager.update_config(
+                {"occlusion_polygons": []}
+            )
+        except (OSError, ValueError):
+            LOGGER.exception("Không thể xóa vùng che khuất.")
+            QMessageBox.critical(
+                self,
+                "Không thể xóa vùng che khuất",
+                "Đã xảy ra lỗi khi cập nhật config.json.",
+            )
+            return
+
+        self._occlusion_polygons = []
+        self._draft_occlusion_points = []
+        self._editing_occlusion = False
+        self._worker.set_occlusion_polygons([])
+        self._refresh_canvas_overlay()
+        self._roi_hint.setText("MASK MÁY: ĐÃ XÓA")
 
     def _acknowledge_alarm(self) -> None:
         """Gửi ACK để ngắt còi và nhả latch theo trạng thái SafetyController.
@@ -1935,10 +2424,7 @@ class HMIMainWindow(QMainWindow):
         stream_state = self._stream_manager.status.state
         canvas_state = (safety.state, stream_state, self._setup_mode)
         if canvas_state != self._last_canvas_state:
-            overlay_points = (
-                self._draft_roi_points if self._setup_mode else self._roi_points
-            )
-            self._canvas.set_roi_overlay(overlay_points, self._setup_mode)
+            self._refresh_canvas_overlay()
             self._last_canvas_state = canvas_state
 
         if safety.state is SafetyState.ALARM:
