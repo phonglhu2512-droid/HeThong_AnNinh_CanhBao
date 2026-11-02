@@ -51,7 +51,7 @@ from src.core.cv_engine import CVProcessor, DisplayMode, FrameAnalysis
 from src.core.safety_controller import SafetyController, SafetyResult, SafetyState
 from src.core.stream_manager import StreamManager, StreamState, VideoSource
 from src.utils.audit_logger import AuditEvent, AuditLogger
-from src.utils.config_manager import ConfigManager
+from src.utils.config_manager import DEFAULT_ROI_POINTS, ConfigManager
 
 
 LOGGER = logging.getLogger(__name__)
@@ -91,6 +91,7 @@ class VideoCanvas(QWidget):
         super().__init__(parent)
         self._image: QImage | None = None
         self._roi_points: list[ROIPoint] = []
+        self._draft_roi_points: list[ROIPoint] = []
         self._editing_roi: bool = False
         self._occlusion_polygons: list[list[ROIPoint]] = []
         self._draft_occlusion_points: list[ROIPoint] = []
@@ -129,6 +130,7 @@ class VideoCanvas(QWidget):
         self,
         points: list[ROIPoint],
         editing: bool,
+        draft_points: list[ROIPoint] | None = None,
         occlusion_polygons: list[list[ROIPoint]] | None = None,
         draft_occlusion_points: list[ROIPoint] | None = None,
         editing_occlusion: bool = False,
@@ -138,6 +140,7 @@ class VideoCanvas(QWidget):
         Args:
             points: Các đỉnh ROI đã lưu hoặc các điểm đang vẽ.
             editing: True khi click trái được dùng để thêm đỉnh ROI.
+            draft_points: Các đỉnh ROI mới, hiển thị cùng ROI đang hoạt động.
             occlusion_polygons: Các đa giác thân máy che lớp ROI mặt sàn.
             draft_occlusion_points: Đa giác che khuất đang được hiệu chuẩn.
             editing_occlusion: True khi click trái thêm đỉnh vùng che khuất.
@@ -146,6 +149,7 @@ class VideoCanvas(QWidget):
             None.
         """
         self._roi_points = list(points)
+        self._draft_roi_points = list(draft_points or [])
         self._editing_roi = editing
         self._occlusion_polygons = [
             list(polygon) for polygon in (occlusion_polygons or [])
@@ -208,14 +212,11 @@ class VideoCanvas(QWidget):
 
         image_rect = self._image_rect()
         painter.drawImage(image_rect, self._image)
-        if not (
-            self._roi_points
-            and (self._editing_roi or self._editing_occlusion)
-        ):
+        if not self._roi_points and not self._draft_roi_points:
             return
 
-        if self._editing_roi:
-            scaled_points = [
+        if self._editing_roi or self._editing_occlusion:
+            active_points = [
                 QPointF(
                     image_rect.x()
                     + point[0] * image_rect.width() / self.FRAME_WIDTH,
@@ -223,6 +224,15 @@ class VideoCanvas(QWidget):
                     + point[1] * image_rect.height() / self.FRAME_HEIGHT,
                 )
                 for point in self._roi_points
+            ]
+            draft_points = [
+                QPointF(
+                    image_rect.x()
+                    + point[0] * image_rect.width() / self.FRAME_WIDTH,
+                    image_rect.y()
+                    + point[1] * image_rect.height() / self.FRAME_HEIGHT,
+                )
+                for point in self._draft_roi_points
             ]
             clip_path = QPainterPath()
             clip_path.addRect(image_rect)
@@ -247,19 +257,37 @@ class VideoCanvas(QWidget):
 
             painter.save()
             painter.setClipPath(clip_path, Qt.ClipOperation.IntersectClip)
-            roi_color = QColor("#F59E0B")
-            pen = QPen(roi_color, 2.0, Qt.PenStyle.DashLine)
-            painter.setPen(pen)
-            if len(scaled_points) >= 2:
-                for index in range(len(scaled_points) - 1):
+            active_color = QColor("#28B4A7")
+            painter.setPen(
+                QPen(active_color, 2.0, Qt.PenStyle.DashLine)
+            )
+            if len(active_points) >= 2:
+                for index in range(len(active_points) - 1):
                     painter.drawLine(
-                        scaled_points[index],
-                        scaled_points[index + 1],
+                        active_points[index],
+                        active_points[index + 1],
                     )
-
-            painter.setBrush(roi_color)
+                painter.drawLine(active_points[-1], active_points[0])
+            painter.setBrush(active_color)
             painter.setPen(Qt.PenStyle.NoPen)
-            for point in scaled_points:
+            for point in active_points:
+                painter.drawEllipse(point, 4.0, 4.0)
+
+            draft_color = QColor("#F59E0B")
+            painter.setPen(
+                QPen(draft_color, 2.0, Qt.PenStyle.DashLine)
+            )
+            if len(draft_points) >= 2:
+                for index in range(len(draft_points) - 1):
+                    painter.drawLine(
+                        draft_points[index],
+                        draft_points[index + 1],
+                    )
+                if len(draft_points) >= 3:
+                    painter.drawLine(draft_points[-1], draft_points[0])
+            painter.setBrush(draft_color)
+            painter.setPen(Qt.PenStyle.NoPen)
+            for point in draft_points:
                 painter.drawEllipse(point, 4.0, 4.0)
             painter.restore()
 
@@ -862,7 +890,7 @@ class HMIMainWindow(QMainWindow):
         self._safety_controller = safety_controller
         self._audit_logger = audit_logger
         self._config = config_manager.get_config()
-        self._roi_points: list[ROIPoint] = [
+        self._active_roi: list[ROIPoint] = [
             (int(point[0]), int(point[1]))
             for point in self._config["roi_points"]
         ]
@@ -873,7 +901,8 @@ class HMIMainWindow(QMainWindow):
             ]
             for polygon in self._config.get("occlusion_polygons", [])
         ]
-        self._draft_roi_points: list[ROIPoint] = []
+        self._draft_roi: list[ROIPoint] = []
+        self._drawing_roi = False
         self._draft_occlusion_points: list[ROIPoint] = []
         self._editing_occlusion = False
         self._webcam_scan_running = False
@@ -897,7 +926,7 @@ class HMIMainWindow(QMainWindow):
             cv_processor,
             safety_controller,
             audit_logger,
-            self._roi_points,
+            self._active_roi,
             self._occlusion_polygons,
         )
         self._worker.start()
@@ -1028,7 +1057,7 @@ class HMIMainWindow(QMainWindow):
         return splitter
 
     def _build_roi_controls(self) -> QWidget:
-        """Tạo Undo, Reset và Lưu ROI cho chế độ cài đặt.
+        """Tạo ba nút ROI và các nút hiệu chuẩn mask thân máy riêng biệt.
 
         Args:
             None.
@@ -1039,27 +1068,30 @@ class HMIMainWindow(QMainWindow):
         controls = QWidget()
         layout = QHBoxLayout(controls)
         layout.setContentsMargins(0, 0, 0, 0)
-        self._undo_roi_button = QPushButton("Undo đỉnh")
-        self._reset_roi_button = QPushButton("Reset ROI")
-        self._save_roi_button = QPushButton("Lưu vùng ROI")
+        self._draw_roi_button = QPushButton(
+            "Vẽ lại Vùng cấm (Click chuột)"
+        )
+        self._delete_roi_point_button = QPushButton("Xóa điểm")
+        self._default_roi_button = QPushButton("Mặc định")
         self._draw_occlusion_button = QPushButton("Vẽ vùng che máy")
         self._undo_occlusion_button = QPushButton("Undo mask")
         self._save_occlusion_button = QPushButton("Lưu mask")
         self._clear_occlusion_button = QPushButton("Xóa mask")
-        self._save_roi_button.setObjectName("primaryButton")
+        self._draw_roi_button.setObjectName("primaryButton")
         self._save_occlusion_button.setObjectName("primaryButton")
-        self._undo_roi_button.clicked.connect(self._undo_roi_point)
-        self._reset_roi_button.clicked.connect(self._reset_roi_draft)
-        self._save_roi_button.clicked.connect(self._save_roi)
+        self._draw_roi_button.clicked.connect(self._toggle_roi_drawing)
+        self._delete_roi_point_button.clicked.connect(self._delete_roi_point)
+        self._default_roi_button.clicked.connect(self._restore_default_roi)
         self._draw_occlusion_button.clicked.connect(self._start_occlusion_draft)
         self._undo_occlusion_button.clicked.connect(self._undo_occlusion_point)
         self._save_occlusion_button.clicked.connect(self._save_occlusion_polygon)
         self._clear_occlusion_button.clicked.connect(self._clear_occlusion_polygons)
-        layout.addWidget(QLabel("HIỆU CHUẨN ROI"))
+        layout.addWidget(QLabel("VÙNG CẤM ROI"))
         layout.addStretch(1)
-        layout.addWidget(self._undo_roi_button)
-        layout.addWidget(self._reset_roi_button)
-        layout.addWidget(self._save_roi_button)
+        layout.addWidget(self._draw_roi_button)
+        layout.addWidget(self._delete_roi_point_button)
+        layout.addWidget(self._default_roi_button)
+        layout.addWidget(QLabel("MASK THÂN MÁY"))
         layout.addWidget(self._draw_occlusion_button)
         layout.addWidget(self._undo_occlusion_button)
         layout.addWidget(self._save_occlusion_button)
@@ -1606,6 +1638,11 @@ class HMIMainWindow(QMainWindow):
         self._setup_mode = index == 1
         if not self._setup_mode:
             self._editing_occlusion = False
+            self._drawing_roi = False
+            self._draft_roi = []
+            self._draw_roi_button.setText(
+                "Vẽ lại Vùng cấm (Click chuột)"
+            )
         self._refresh_canvas_overlay()
         for widget in (
             self._roi_controls,
@@ -1632,12 +1669,10 @@ class HMIMainWindow(QMainWindow):
         Returns:
             None.
         """
-        roi_points = (
-            self._draft_roi_points if self._setup_mode else self._roi_points
-        )
         self._canvas.set_roi_overlay(
-            roi_points,
-            editing=self._setup_mode and not self._editing_occlusion,
+            self._active_roi,
+            editing=self._setup_mode and self._drawing_roi,
+            draft_points=self._draft_roi if self._drawing_roi else [],
             occlusion_polygons=self._occlusion_polygons,
             draft_occlusion_points=(
                 self._draft_occlusion_points
@@ -1913,7 +1948,7 @@ class HMIMainWindow(QMainWindow):
         )
 
     def _add_roi_point(self, x: int, y: int) -> None:
-        """Thêm tọa độ click vào polygon ROI đang hiệu chuẩn.
+        """Thêm đỉnh mới vào đa giác ROI nháp khi toggle đang bật.
 
         Args:
             x: Tọa độ ngang trong frame chuẩn 640×360.
@@ -1922,65 +1957,44 @@ class HMIMainWindow(QMainWindow):
         Returns:
             None.
         """
+        if not self._setup_mode or not self._drawing_roi:
+            return
+        self._draft_roi.append((x, y))
+        self._refresh_canvas_overlay()
+        self._roi_hint.setText(f"ROI MỚI: {len(self._draft_roi)} ĐỈNH")
+
+    def _toggle_roi_drawing(self, checked: bool = False) -> None:
+        """Bật chế độ vẽ ROI mới hoặc xác nhận và lưu polygon nháp.
+
+        Args:
+            checked: Trạng thái nút gửi bởi tín hiệu clicked của Qt.
+
+        Returns:
+            None.
+        """
+        del checked
         if not self._setup_mode:
             return
-        if self._editing_occlusion:
+
+        if not self._drawing_roi:
+            self._draft_roi = []
+            self._editing_occlusion = False
+            self._drawing_roi = True
+            self._draw_roi_button.setText("Xác nhận Vùng cấm mới")
+            self._refresh_canvas_overlay()
+            self._roi_hint.setText("ĐANG VẼ ROI MỚI · CHẤM TỐI THIỂU 3 ĐỈNH")
             return
-        self._draft_roi_points.append((x, y))
-        self._refresh_canvas_overlay()
-        self._roi_hint.setText(f"ROI: {len(self._draft_roi_points)} ĐỈNH")
 
-    def _undo_roi_point(self) -> None:
-        """Xóa đỉnh cuối cùng vừa thêm trong bản nháp ROI.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-        """
-        if self._draft_roi_points:
-            self._draft_roi_points.pop()
-        self._refresh_canvas_overlay()
-        self._roi_hint.setText(f"ROI: {len(self._draft_roi_points)} ĐỈNH")
-
-    def _reset_roi_draft(self) -> None:
-        """Khôi phục bản nháp ROI về đa giác đã lưu trong cấu hình.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-        """
-        self._draft_roi_points = list(self._roi_points)
-        self._editing_occlusion = False
-        self._refresh_canvas_overlay()
-        self._roi_hint.setText(f"ROI: {len(self._draft_roi_points)} ĐỈNH")
-
-    def _save_roi(self) -> None:
-        """Lưu ROI có ít nhất ba đỉnh cho config và worker CV.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            OSError: Khi không thể ghi config.json.
-            ValueError: Khi ROI không đủ ba đỉnh.
-        """
-        if len(self._draft_roi_points) < 3:
+        if len(self._draft_roi) < 3:
             QMessageBox.warning(
                 self,
                 "ROI chưa hợp lệ",
-                "Đa giác vùng cấm cần tối thiểu 3 đỉnh.",
+                "Hãy chấm ít nhất 3 đỉnh trước khi xác nhận vùng cấm.",
             )
             return
         try:
             self._config = self._config_manager.update_config(
-                {"roi_points": [list(point) for point in self._draft_roi_points]}
+                {"roi_points": [list(point) for point in self._draft_roi]}
             )
         except (OSError, ValueError):
             LOGGER.exception("Không thể lưu polygon ROI.")
@@ -1991,10 +2005,88 @@ class HMIMainWindow(QMainWindow):
             )
             return
 
-        self._roi_points = list(self._draft_roi_points)
-        self._worker.set_roi_points(self._roi_points)
+        self._active_roi = list(self._draft_roi)
+        self._worker.set_roi_points(self._active_roi)
+        self._draft_roi = []
+        self._drawing_roi = False
+        self._draw_roi_button.setText("Vẽ lại Vùng cấm (Click chuột)")
         self._refresh_canvas_overlay()
-        self._roi_hint.setText(f"ROI: ĐÃ LƯU · {len(self._roi_points)} ĐỈNH")
+        self._roi_hint.setText(f"ROI: ĐÃ LƯU · {len(self._active_roi)} ĐỈNH")
+
+    def _delete_roi_point(self, checked: bool = False) -> None:
+        """Xóa đỉnh cuối danh sách đang hiệu chỉnh nhưng không dưới ba đỉnh.
+
+        Args:
+            checked: Trạng thái nút gửi bởi tín hiệu clicked của Qt.
+
+        Returns:
+            None.
+        """
+        del checked
+        if self._drawing_roi:
+            if len(self._draft_roi) <= 3:
+                self._roi_hint.setText("ROI NHÁP CẦN GIỮ TỐI THIỂU 3 ĐỈNH")
+                return
+            self._draft_roi.pop()
+            self._refresh_canvas_overlay()
+            self._roi_hint.setText(f"ROI MỚI: {len(self._draft_roi)} ĐỈNH")
+            return
+
+        if len(self._active_roi) <= 3:
+            self._roi_hint.setText("ROI CẦN GIỮ TỐI THIỂU 3 ĐỈNH")
+            return
+        updated_roi = self._active_roi[:-1]
+        try:
+            self._config = self._config_manager.update_config(
+                {"roi_points": [list(point) for point in updated_roi]}
+            )
+        except (OSError, ValueError):
+            LOGGER.exception("Không thể lưu ROI sau khi xóa đỉnh.")
+            QMessageBox.critical(
+                self,
+                "Không thể cập nhật ROI",
+                "Đã xảy ra lỗi khi lưu vùng cấm đã chỉnh sửa.",
+            )
+            return
+
+        self._active_roi = updated_roi
+        self._worker.set_roi_points(self._active_roi)
+        self._refresh_canvas_overlay()
+        self._roi_hint.setText(
+            f"ROI: ĐÃ CẬP NHẬT · {len(self._active_roi)} ĐỈNH"
+        )
+
+    def _restore_default_roi(self, checked: bool = False) -> None:
+        """Hủy bản nháp và lưu lại ROI mặc định ban đầu của hệ thống.
+
+        Args:
+            checked: Trạng thái nút gửi bởi tín hiệu clicked của Qt.
+
+        Returns:
+            None.
+        """
+        del checked
+        default_roi = list(DEFAULT_ROI_POINTS)
+        try:
+            self._config = self._config_manager.update_config(
+                {"roi_points": [list(point) for point in default_roi]}
+            )
+        except (OSError, ValueError):
+            LOGGER.exception("Không thể khôi phục ROI mặc định.")
+            QMessageBox.critical(
+                self,
+                "Không thể khôi phục ROI",
+                "Đã xảy ra lỗi khi lưu vùng cấm mặc định.",
+            )
+            return
+
+        self._active_roi = default_roi
+        self._draft_roi = []
+        self._drawing_roi = False
+        self._draw_roi_button.setText("Vẽ lại Vùng cấm (Click chuột)")
+        self._worker.set_roi_points(self._active_roi)
+        self._refresh_canvas_overlay()
+        self._roi_hint.setText("ROI: ĐÃ KHÔI PHỤC MẶC ĐỊNH")
 
     def _start_occlusion_draft(self) -> None:
         """Bắt đầu vẽ đa giác loại trừ thân máy khỏi lớp phủ ROI.
@@ -2007,6 +2099,9 @@ class HMIMainWindow(QMainWindow):
         """
         if not self._setup_mode:
             return
+        self._drawing_roi = False
+        self._draft_roi = []
+        self._draw_roi_button.setText("Vẽ lại Vùng cấm (Click chuột)")
         self._editing_occlusion = True
         self._draft_occlusion_points = []
         self._refresh_canvas_overlay()

@@ -12,6 +12,12 @@ from typing import Any
 
 
 LOGGER = logging.getLogger(__name__)
+DEFAULT_ROI_POINTS: tuple[tuple[int, int], ...] = (
+    (160, 120),
+    (480, 120),
+    (480, 320),
+    (160, 320),
+)
 
 
 class ConfigManager:
@@ -71,8 +77,7 @@ class ConfigManager:
                 "password": "",
                 "profile": "ONVIF",
             },
-            # Đa giác mẫu theo hệ tọa độ 640x360, có thể hiệu chuẩn lại trên HMI.
-            "roi_points": [[160, 120], [480, 120], [480, 320], [160, 320]],
+            "roi_points": [list(point) for point in DEFAULT_ROI_POINTS],
             "occlusion_polygons": [],
             "min_area": 1500,
             "violation_delay": 0.8,

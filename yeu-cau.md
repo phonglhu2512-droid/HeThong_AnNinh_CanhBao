@@ -179,13 +179,14 @@
   4. Toàn bộ thông số kết nối hợp lệ sau khi áp dụng phải được tự động ghi đè và lưu trữ bền vững vào tệp `config.json`.
 
 ### US-06: Thiết lập và hiệu chuẩn đa giác vùng nguy hiểm động (Dynamic ROI Calibration)
-* **Câu chuyện:** *"Tôi là **Kỹ sư Hệ thống (System Admin)**, muốn làm thao tác **dùng chuột chấm trực tiếp các đỉnh trên khung hình video để vẽ đa giác vùng cấm (ROI), hỗ trợ hoàn tác (Undo) hoặc đặt lại (Reset)** để **thiết lập nhanh rào chắn ảo khớp với hình dáng thực tế của từng khu vực máy móc mà không phải can thiệp sửa mã nguồn Python**."*
+* **Câu chuyện:** *"Tôi là **Kỹ sư Hệ thống (System Admin)**, muốn dùng ba thao tác `[Vẽ lại Vùng cấm (Click chuột)]` / `[Xác nhận Vùng cấm mới]`, `[Xóa điểm]` và `[Mặc định]` để vẽ lại ROI trực tiếp trên khung hình mà vẫn đối chiếu được vùng đang hoạt động."*
 * **Điều kiện chấp nhận (Acceptance Criteria - AC):**
-  1. Khi bật chế độ `[Vẽ lại ROI]`, người dùng có thể click chuột trái lên khung hình Live Viewport để chấm tuần tự các đỉnh $(x_i, y_i)$; hệ thống chỉ cho phép lưu khi số lượng đỉnh tạo thành đa giác khép kín $N \ge 3$.
-  2. Nút `[Undo]` xóa chính xác đỉnh vừa chấm gần nhất; nút `[Reset]` xóa toàn bộ các điểm đang vẽ để khôi phục về đa giác mặc định ban đầu.
-  3. Tọa độ ROI và vùng che khuất thân máy đều dùng chung hệ tọa độ frame `640×360`; vùng che khuất có thể được hiệu chuẩn thành một hoặc nhiều đa giác riêng.
-  4. Khi nhấn `[Lưu vùng ROI]`, mảng tọa độ các đỉnh đa giác phải được cập nhật ngay lập tức vào bộ kiểm tra `cv2.pointPolygonTest` ở frame kế tiếp và ghi vào khóa `"roi_points"` trong tệp `config.json`; vùng che khuất được lưu vào `"occlusion_polygons"`.
-  5. Lớp phủ ROI sàn được trộn alpha, loại trừ foreground chuyển động và bị cắt tại các đa giác che khuất đã hiệu chuẩn để không phủ lên người hoặc thân máy.
+  1. Nhấn lần đầu nút vẽ khởi tạo `draft_roi = []`, giữ ROI hiện hành hiển thị và cho phép chấm liên tiếp; từ 3 đỉnh, draft được nối thành polygon khép kín và các đỉnh tiếp theo cập nhật đa giác.
+  2. Nhấn xác nhận chỉ lưu khi draft có ít nhất 3 đỉnh; sau khi lưu, draft thay thế ROI đang hoạt động và cập nhật ngay cho `cv2.pointPolygonTest`.
+  3. `[Xóa điểm]` xóa đỉnh cuối của draft khi đang vẽ, hoặc của ROI đang hoạt động khi không vẽ; không cho phép xóa khiến đa giác còn ít hơn 3 đỉnh.
+  4. `[Mặc định]` hủy draft, khôi phục và lưu `DEFAULT_ROI_POINTS` dùng chung với cấu hình mặc định.
+  5. Tọa độ ROI và vùng che khuất thân máy đều dùng chung hệ tọa độ frame `640×360`; vùng che khuất có thể được hiệu chuẩn thành một hoặc nhiều đa giác riêng.
+  6. Lớp phủ ROI sàn được trộn alpha, loại trừ foreground chuyển động và bị cắt tại các đa giác che khuất đã hiệu chuẩn để không phủ lên người hoặc thân máy.
 
 ### US-07: Tinh chỉnh tham số lọc nhiễu diện tích và độ trễ báo động
 * **Câu chuyện:** *"Tôi là **Kỹ sư Hệ thống (System Admin)**, muốn làm việc **điều chỉnh thanh trượt ngưỡng diện tích tối thiểu ($S_{\min}$) và thời gian trễ kích hoạt báo động ($t_{\text{delay}}$)** trên bảng điều khiển kỹ thuật để **tối ưu hóa độ nhạy của hệ thống theo khoảng cách lắp đặt camera và đặc thù vận hành của từng phân xưởng**."*
