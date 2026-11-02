@@ -47,7 +47,7 @@
   * *Khử bóng đổ:* Chỉ kiểm tra điểm tiếp xúc chân người trên mặt sàn $P_{\text{foot}} = (x + w/2, y + h)$ thay vì dùng toàn bộ hộp bao thân trên.
   * *Chống nhiễu thoáng qua:* Tích hợp bộ đệm thời gian trễ ($t_{\text{delay}} = 0.8\text{s}$) và ngưỡng diện tích tối thiểu ($S_{\min} = 1500\text{ px}^2$).
   * *Bảo vệ sốc sáng:* Tự động reset mô hình nền khi diện tích biến đổi vượt quá $60\%$ khung hình do bật/tắt đèn xưởng.
-* **Chốt giữ cảnh báo & Kiểm toán:** Giữ còi báo động cho đến khi người trực nhấn nút xác nhận (`ACK ALARM`); hỗ trợ lọc lịch sử theo Ca/Giờ, xem ảnh trên khay Snapshot Carousel và xuất báo cáo `.csv`.
+* **Cảnh báo & Kiểm toán:** Khi xâm nhập vượt thời gian trễ, phát còi và giữ cảnh báo đỏ đến khi người bước ra ROI; người trực có thể ACK để tắt tiếng trong khi vẫn giữ cảnh báo đỏ. Tự động chốt thời lượng vi phạm khi thoát vùng; hỗ trợ lọc lịch sử theo Ca/Giờ, xem ảnh trên khay Snapshot Carousel và xuất báo cáo `.csv`.
 
 ---
 
@@ -142,13 +142,13 @@
   3. Mỗi đối tượng chuyển động hợp lệ (có diện tích $S \ge 1500\text{ px}^2$) phải được đóng khung chữ nhật (`Bounding Box`) kèm theo một chấm tròn đánh dấu chính xác tọa độ điểm chân tiếp xúc sàn $P_{\text{foot}} = (x + w/2, y + h)$.
   4. Góc màn hình hiển thị thời gian thực các chỉ số kỹ thuật gồm: Nhịp FPS hiện tại, trạng thái kết nối luồng và số lượng người trong khung hình.
 
-### US-02: Xác nhận sự cố và ngắt còi báo động chốt giữ (ACK Alarm)
-* **Câu chuyện:** *"Tôi là **Nhân viên Trực ca An toàn (Safety Operator)**, muốn làm thao tác **nhấn nút `[Xác nhận sự cố / Tắt còi]` (ACK ALARM) sau khi đã kiểm tra hiện trường vụ vi phạm** để **ngắt âm thanh còi hú, mở khóa trạng thái chốt giữ cảnh báo (Alarm Latch) và đưa hệ thống trở lại trạng thái giám sát sẵn sàng**."*
+### US-02: Xác nhận sự cố và ngắt còi báo động (ACK Alarm)
+* **Câu chuyện:** *"Tôi là **Nhân viên Trực ca An toàn (Safety Operator)**, muốn nhấn nút `[Xác nhận sự cố / Tắt còi]` (ACK ALARM) để **xác nhận đã biết sự cố và tắt còi trong khi người vi phạm còn đứng trong ROI, nhưng vẫn giữ cảnh báo đỏ cho đến khi người đó bước ra**."*
 * **Điều kiện chấp nhận (Acceptance Criteria - AC):**
-  1. Khi xảy ra vi phạm vượt ngưỡng trễ ($t_{\text{violation}} \ge 0.8\text{s}$), hệ thống chuyển sang trạng thái `BÁO ĐỘNG ĐỎ` và chốt giữ (latch) trạng thái này ngay cả khi công nhân đã bước lùi ra ngoài vùng cấm.
-  2. Nút `[Xác nhận sự cố / Tắt còi]` chỉ kích hoạt (active) và sáng màu đỏ đô (`#9B1B30`) hoặc đỏ cảnh báo (`#E11D48`) khi hệ thống đang trong trạng thái chốt giữ báo động.
-  3. Ngay khi người trực nhấn nút `ACK ALARM` (thời gian phản hồi giao diện $< 50\text{ ms}$), âm thanh còi hú phải ngắt ngay lập tức.
-  4. Nếu tại thời điểm nhấn nút, điểm chân $P_{\text{foot}}$ đã nằm ngoài vùng ROI ($\text{pointPolygonTest} < 0$), viền ROI quay về màu an toàn; nếu công nhân vẫn còn đứng trong vùng cấm, hệ thống ngắt tiếng còi nhưng giữ nguyên cảnh báo thị giác màu đỏ.
+  1. Khi xâm nhập liên tục đạt ngưỡng trễ ($t_{\text{violation}} \ge t_{\text{delay}}$), hệ thống chuyển sang `ALARM`, kích hoạt E-STOP và phát còi hú liên tục nếu chưa mute.
+  2. Khi tất cả điểm chân không còn trong ROI (hoặc không còn đối tượng trong vùng), hệ thống tự động dừng còi, xóa latch/E-STOP, chuyển sang `SAFE` và đặt `is_muted = False` mà không cần ACK.
+  3. Khi người vẫn trong ROI, ACK đặt `is_muted = True` và dừng còi ngay; trạng thái `ALARM`, latch và E-STOP vẫn được giữ đến khi người bước ra.
+  4. Khi thoát ROI, thời lượng vi phạm được chốt và cập nhật vào bản ghi kiểm toán.
 
 ### US-03: Lọc lịch sử vi phạm theo mốc thời gian và tra cứu ảnh bằng chứng (Snapshot)
 * **Câu chuyện:** *"Tôi là **Nhân viên Trực ca An toàn (Safety Operator)**, muốn làm việc **lọc danh sách nhật ký vi phạm theo ca làm việc hoặc khoảng ngày/giờ và nhấp xem lại thẻ ảnh Snapshot tương ứng trên thanh cuộn Bottom Dock** để **nhanh chóng đối chiếu bằng chứng hình ảnh thực tế của từng vụ xâm nhập khi bàn giao ca**."*
@@ -272,7 +272,7 @@
 * **Điều kiện chấp nhận (Acceptance Criteria - AC):**
   1. Ngay khi trạng thái hệ thống chuyển sang `BÁO ĐỘNG ĐỎ` ($t_{\text{violation}} \ge 0.8\text{s}$), luồng âm thanh cảnh báo (Siren/Beep) được kích hoạt bất đồng bộ (không làm nghẽn luồng xử lý video chính) với độ trễ âm thanh $< 50\text{ ms}$.
   2. Hệ thống đồng thời xuất tín hiệu điều khiển dừng khẩn cấp (`E-STOP TRIGGERED` hiển thị trên giao diện HMI và xuất cờ tín hiệu ra cổng giao tiếp mô phỏng) để ngắt chu trình máy móc.
-  3. Trạng thái còi hú và khóa liên động dừng máy được duy trì liên tục cho đến khi nhận được tín hiệu xác nhận `ACK ALARM` hợp lệ từ Nhân viên Trực ca (ACT-01).
+  3. Còi hú và khóa liên động được duy trì trong khi người còn ở ROI (trừ khi đã mute bằng ACK); khi người bước ra, hệ thống tự động tắt còi và nhả trạng thái báo động/E-STOP. ACK chỉ mute âm thanh, không đưa trạng thái về SAFE khi nguy cơ còn tồn tại.
 
 ---
 

@@ -112,6 +112,7 @@ class SafetyController:
         self._latched: bool = False
         self._estop_triggered: bool = False
         self._acknowledged: bool = False
+        self._is_muted: bool = False
         self._entry_alarm_triggered: bool = False
         self._audio_stop_event: threading.Event | None = None
         self._audio_thread: threading.Thread | None = None
@@ -179,6 +180,19 @@ class SafetyController:
             return self._latched
 
     @property
+    def is_muted(self) -> bool:
+        """Cho biết còi báo động đã được nhân viên xác nhận tắt tiếng chưa.
+
+        Args:
+            None.
+
+        Returns:
+            True khi còi đã mute cho lần xâm nhập hiện tại.
+        """
+        with self._lock:
+            return self._is_muted
+
+    @property
     def estop_triggered(self) -> bool:
         """Đọc cờ mô phỏng tín hiệu dừng máy khẩn cấp.
 
@@ -235,7 +249,7 @@ class SafetyController:
             foot_point: Tọa độ chân cần kiểm tra; None biểu thị không có đối tượng.
             roi_points: Tối thiểu ba đỉnh đa giác ROI theo hệ tọa độ frame.
             timestamp: Mốc đơn điệu tính bằng giây; None dùng time.monotonic().
-            skip_evaluation: Bỏ đánh giá frame sốc sáng nhưng giữ nguyên latch.
+            skip_evaluation: Bỏ đánh giá frame sốc sáng, giữ trạng thái hiện hành.
 
         Returns:
             SafetyResult gồm trạng thái, thời lượng, latch và cờ E-STOP hiện tại.
@@ -274,6 +288,7 @@ class SafetyController:
                     self._inside_since = float(current_time)
                     self._entry_alarm_triggered = False
                     self._acknowledged = False
+                    self._is_muted = False
 
                 duration = max(0.0, float(current_time) - self._inside_since)
                 delay_reached = duration >= self._violation_delay or math.isclose(
@@ -289,14 +304,19 @@ class SafetyController:
                         self._latched = True
                         self._estop_triggered = True
                         self._acknowledged = False
-                        self._start_alarm_audio_locked()
+                        if not self._is_muted:
+                            self._start_alarm_audio_locked()
                 elif not self._latched:
                     self._state = SafetyState.WARNING
             else:
                 self._inside_since = None
                 self._entry_alarm_triggered = False
-                if not self._latched:
-                    self._state = SafetyState.SAFE
+                self._state = SafetyState.SAFE
+                self._latched = False
+                self._estop_triggered = False
+                self._acknowledged = False
+                self._is_muted = False
+                self._silence_alarm_locked()
 
             return self._build_result(
                 foot_point=validated_point,
@@ -305,10 +325,10 @@ class SafetyController:
             )
 
     def acknowledge_alarm(self) -> bool:
-        """Xác nhận báo động, ngắt còi và nhả cờ E-STOP mô phỏng.
+        """Xác nhận đã biết sự cố và tắt còi trong khi người còn trong ROI.
 
         Returns:
-            True nếu có báo động được xác nhận; False nếu chưa có latch.
+            True nếu báo động đang được giữ và đã được mute; False nếu chưa có.
 
         Raises:
             RuntimeError: Khi controller đã đóng.
@@ -319,19 +339,19 @@ class SafetyController:
             if not self._latched:
                 return False
 
-            self._latched = False
-            self._estop_triggered = False
-            self._acknowledged = True
-            stop_event = self._audio_stop_event
-            if stop_event is not None:
-                stop_event.set()
-            self._stop_alarm_sound_locked()
-
-            if self._inside_roi:
-                # Giữ cảnh báo đỏ nếu người vẫn còn trong vùng ROI sau ACK.
-                self._state = SafetyState.ALARM
-            else:
+            if not self._inside_roi:
                 self._state = SafetyState.SAFE
+                self._latched = False
+                self._estop_triggered = False
+                self._acknowledged = False
+                self._is_muted = False
+                self._silence_alarm_locked()
+                return True
+
+            self._is_muted = True
+            self._acknowledged = True
+            self._silence_alarm_locked()
+            self._state = SafetyState.ALARM
 
         return True
 
@@ -519,7 +539,7 @@ class SafetyController:
         """Phát lặp tiếng còi ở worker riêng, không chặn xử lý frame.
 
         Args:
-            stop_event: Cờ dừng được kích hoạt bởi ACK hoặc đóng ứng dụng.
+            stop_event: Cờ dừng được kích hoạt bởi ACK, thoát ROI hoặc đóng ứng dụng.
 
         Returns:
             None.
@@ -566,6 +586,20 @@ class SafetyController:
         except Exception as error:
             self._audio_error = str(error)
             LOGGER.exception("Không thể dừng playback còi báo động.")
+
+    def _silence_alarm_locked(self) -> None:
+        """Ngắt worker và playback còi khi đang giữ self._lock.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+        """
+        stop_event = self._audio_stop_event
+        if stop_event is not None and not stop_event.is_set():
+            stop_event.set()
+            self._stop_alarm_sound_locked()
 
     @staticmethod
     def _join_audio_thread(thread: threading.Thread | None) -> None:
