@@ -13,26 +13,25 @@ Hệ thống giám sát an ninh và an toàn lao động thời gian thực tíc
 ## 📌 Các Tính Năng Nổi Bật
 
 - **Mô hình Hybrid AI (YOLOv8n + Geometric Engine):**
-  - Loại bỏ hoàn toàn báo động giả do đồ vật tĩnh (bàn ghế, quạt, máy móc) nhờ phát hiện chính xác đối tượng con người (`class 0: person`).
-  - Kiểm tra điều kiện xâm nhập đa điểm: Kết hợp kiểm tra điểm tiếp xúc sàn ($P_{\text{foot}}$) và thuật toán giao cắt đường biên giữa hộp bao (Bounding Box) với đa giác vùng cấm (ROI).
+  - Nhận diện người chính xác (`class 0: person`), loại bỏ hoàn toàn báo động giả do đồ vật tĩnh hoặc thay đổi ánh sáng.
+  - Thuật toán kích hoạt đa điều kiện: Kiểm tra điểm tiếp xúc sàn ($P_{\text{foot}}$) và sự giao cắt giữa hộp bao Bounding Box với đa giác vùng cấm (ROI).
 - **Giao diện Giám sát Chuẩn Công nghiệp (ISA-101 High-Performance HMI):**
-  - Tối ưu hóa thị giác cho kỹ sư vận hành với bảng màu High-Performance HMI (nền sáng, điểm nhấn Đỏ đô `#9B1B30` và Xanh ngọc `#10B981`).
-  - Hệ thống thẻ trạng thái vận hành nằm ngang trực quan, theo dõi số lượng người, số lượt cảnh báo theo ca và trạng thái máy.
+  - Tối ưu hóa thị giác theo tiêu chuẩn ISA-101 với bảng màu tương phản nhẹ nhàng, điểm nhấn Đỏ đô `#9B1B30` và Xanh ngọc `#10B981`.
+  - Bộ thẻ trạng thái vận hành trực quan, theo dõi số lượng người, số lượt cảnh báo theo ca và trạng thái máy dập.
 - **Tương tác Vùng cấm (ROI) & Vùng che chắn (Machine Mask):**
-  - Hỗ trợ công cụ chấm điểm vẽ trực tiếp đa giác vùng nguy hiểm ngay trên màn hình Live Stream.
-  - Hỗ trợ tính năng vẽ vùng Mask che chắn các bộ phận cơ khí chuyển động lặp lại để chống nhiễu quang học.
+  - Hỗ trợ công cụ click chuột chấm điểm vẽ đa giác vùng cấm linh hoạt trực tiếp trên màn hình Live Stream.
+  - Tính năng vẽ vùng Mask che chắn các chi tiết cơ khí chuyển động lặp lại để loại trừ nhiễu quang học.
 - **Quản lý Bằng chứng Vi phạm (Snapshot Carousel & Audit Logger):**
   - Tự động trích xuất và hiển thị các thẻ ảnh vi phạm kèm mốc thời gian (Timestamp) dạng cuộn ngang (Bottom Dock).
   - Tự động ghi nhật ký vi phạm ra file báo cáo `Violation_Report.csv` phục vụ kiểm toán an toàn lao động.
 - **Xử lý Luồng Video & Giao thức Công nghiệp:**
-  - Kiến trúc xử lý đa luồng bất đồng bộ (Multi-threading với `Queue(maxsize=1)`) bảo đảm UI không bao giờ bị đơ/lag.
-  - Hỗ trợ đa dạng nguồn cấp: RTSP Stream (Camera Dahua, Imou, Hikvision...), Webcam USB/Laptop (tự động cân chỉnh lật gương) và Video File demo.
+  - Kiến trúc xử lý đa luồng bất đồng bộ (Multi-threading với `Queue(maxsize=1)`) bảo đảm UI không bao giờ bị giật lag.
+  - Hỗ trợ đa dạng nguồn cấp: RTSP Stream (Camera Dahua, Imou, Hikvision...), Webcam USB/Laptop (tự động cân chỉnh lật gương) và Video File.
 
 ---
 
-## 🏗️ Kiến Trúc Hệ Thống (Git Flow Architecture)
+## 🏗️ Cấu Trúc Mã Nguồn
 
-Dự án được xây dựng theo kiến trúc module hóa tuần tự:
 ```text
 HeThong_AnNinh_CanhBao/
 ├── config/
@@ -53,7 +52,9 @@ HeThong_AnNinh_CanhBao/
 ├── main.py                      # Điểm khởi chạy ứng dụng chính
 ├── yolov8n.pt                   # Trọng số mô hình nhận diện người YOLOv8-Nano
 └── requirements.txt             # Danh sách thư viện phụ thuộc
+```
 
+---
 
 ## ⚙️ Hướng Dẫn Cài Đặt & Khởi Chạy
 
@@ -84,6 +85,7 @@ pip install -r requirements.txt
 # 5. Khởi chạy phần mềm
 python main.py
 ```
+
 ---
 
 ## 🔒 Cấu Hình Kết Nối Camera IP (Giao Thức RTSP)
