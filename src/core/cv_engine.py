@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import threading
 from dataclasses import dataclass
 from enum import Enum
+from importlib import import_module
+from typing import Any
 
 import cv2
 import numpy as np
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class DisplayMode(str, Enum):
@@ -21,7 +27,7 @@ class DisplayMode(str, Enum):
 
 @dataclass(frozen=True)
 class Detection:
-    """Thông tin hình học của một vùng chuyển động đủ ngưỡng diện tích."""
+    """Thông tin hình học của người được phát hiện trong frame chuẩn."""
 
     bounding_box: tuple[int, int, int, int]
     foot_point: tuple[int, int]
@@ -43,7 +49,7 @@ class FrameAnalysis:
 
 
 class CVProcessor:
-    """Xử lý frame bằng MOG2, morphology và trích xuất điểm chân."""
+    """Kết hợp YOLOv8 và OpenCV để phát hiện người, tạo các lớp ảnh Debug."""
 
     FRAME_SIZE: tuple[int, int] = (640, 360)
     DEFAULT_MIN_AREA: float = 1500.0
@@ -59,7 +65,7 @@ class CVProcessor:
         min_area: float = DEFAULT_MIN_AREA,
         display_mode: DisplayMode | str = DisplayMode.RGB,
     ) -> None:
-        """Khởi tạo mô hình MOG2 và cấu hình xử lý ảnh.
+        """Khởi tạo MOG2 và thử tải YOLOv8n, fallback nếu model không sẵn có.
 
         Args:
             min_area: Diện tích contour nhỏ nhất được giữ lại, từ 500 đến 5000 px².
@@ -81,6 +87,15 @@ class CVProcessor:
         )
         self._background_subtractor = self._create_background_subtractor()
         self._protect_background: bool = False
+        self.yolo_model: Any | None = None
+        try:
+            yolo_module = import_module("ultralytics")
+            yolo_factory = getattr(yolo_module, "YOLO")
+            self.yolo_model = yolo_factory("yolov8n.pt")
+        except Exception:
+            LOGGER.exception(
+                "Không tải được YOLOv8n; chuyển sang phát hiện contour MOG2."
+            )
 
     @staticmethod
     def _validate_min_area(min_area: float) -> float:
@@ -222,7 +237,7 @@ class CVProcessor:
         display_mode: DisplayMode | str | None = None,
         roi_points: list[tuple[int, int]] | None = None,
     ) -> FrameAnalysis:
-        """Phân tích chuyển động, lọc bóng và trả ảnh ở cả ba chế độ xem.
+        """Phát hiện người bằng YOLO, giữ MOG2/Canny cho hiển thị và fallback.
 
         Args:
             frame: Frame BGR đầu vào từ StreamManager.
@@ -231,8 +246,8 @@ class CVProcessor:
 
         Returns:
             FrameAnalysis chứa RGB, mặt nạ MOG2, Canny, detections và cờ sốc sáng.
-            Mặt nạ MOG2 hiển thị giữ pixel bóng xám 127; mặt nạ dùng tìm contour
-            chỉ giữ pixel vật thể 255 để bóng không trở thành đối tượng phát hiện.
+            Khi YOLO không khả dụng, detections được tạo từ foreground MOG2;
+            bóng xám 127 bị loại để không trở thành contour phát hiện.
 
         Raises:
             TypeError: Khi frame không phải numpy.ndarray.
@@ -267,6 +282,21 @@ class CVProcessor:
             illumination_shift = (
                 white_pixel_ratio > self.ILLUMINATION_THRESHOLD
             )
+            yolo_detections: tuple[Detection, ...] | None = None
+            if self.yolo_model is not None:
+                results = self.yolo_model.predict(
+                    rgb_frame,
+                    classes=[0],
+                    conf=0.45,
+                    imgsz=640,
+                    verbose=False,
+                )
+                yolo_detections = self._extract_yolo_detections(
+                    results,
+                    min_area,
+                    rgb_frame.shape[1],
+                    rgb_frame.shape[0],
+                )
 
             if illumination_shift:
                 # Không cho frame sốc sáng tạo contour; mô hình mới học lại nền
@@ -276,8 +306,18 @@ class CVProcessor:
                     blurred_frame,
                     learningRate=1.0,
                 )
-                detections: tuple[Detection, ...] = ()
+                detections = yolo_detections or ()
                 self._protect_background = False
+            elif yolo_detections is not None:
+                detections = yolo_detections
+                person_in_roi = self._has_detection_in_roi(
+                    detections,
+                    roi_points,
+                )
+                self._protect_background = (
+                    white_pixel_ratio >= self.LARGE_MOTION_THRESHOLD
+                    or person_in_roi
+                )
             else:
                 opened_mask = cv2.morphologyEx(
                     object_mask, cv2.MORPH_OPEN, self._morph_kernel
@@ -322,6 +362,51 @@ class CVProcessor:
             illumination_shift=illumination_shift,
             skip_safety_evaluation=illumination_shift,
         )
+
+    @staticmethod
+    def _extract_yolo_detections(
+        results: Any,
+        min_area: float,
+        frame_width: int,
+        frame_height: int,
+    ) -> tuple[Detection, ...]:
+        """Lọc riêng class người và chuyển box YOLO thành tọa độ frame chuẩn.
+
+        Args:
+            results: Kết quả trả về từ Ultralytics YOLO.predict.
+            min_area: Diện tích bounding box tối thiểu cần giữ lại.
+            frame_width: Chiều rộng frame đã resize.
+            frame_height: Chiều cao frame đã resize.
+
+        Returns:
+            Các Detection class 0 có diện tích bounding box đạt ngưỡng.
+        """
+        detections: list[Detection] = []
+        for result in results:
+            boxes = result.boxes
+            if boxes is None:
+                continue
+            for box in boxes:
+                if int(box.cls.item()) != 0:
+                    continue
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                x = max(0, min(int(x1), frame_width))
+                y = max(0, min(int(y1), frame_height))
+                right = max(x, min(int(x2), frame_width))
+                bottom = max(y, min(int(y2), frame_height))
+                width = right - x
+                height = bottom - y
+                area = width * height
+                if area < min_area or width == 0 or height == 0:
+                    continue
+                detections.append(
+                    Detection(
+                        bounding_box=(x, y, width, height),
+                        foot_point=(x + width // 2, y + height),
+                        area=float(area),
+                    )
+                )
+        return tuple(detections)
 
     @staticmethod
     def _has_detection_in_roi(

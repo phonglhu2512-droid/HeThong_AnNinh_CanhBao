@@ -29,9 +29,9 @@
   ],
   "occlusion_polygons": [],
   "display_overlays": {
-    "bounding_box": true,
+    "bounding_box": false,
     "foot_point": true
   },
-  "min_area": 1500,
+  "min_area": 1510,
   "violation_delay": 0.8
 }

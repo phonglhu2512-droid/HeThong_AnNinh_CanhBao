@@ -753,6 +753,52 @@ class _CVSafetyWorker(threading.Thread):
                     object_color,
                     2,
                 )
+                label = f"WORKER | S:{width * height}px"
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                baseline_y = max(y - 7, 18)
+                (label_width, _), _ = cv2.getTextSize(
+                    label, font, 0.42, 1
+                )
+                cv2.putText(
+                    rendered,
+                    label,
+                    (x, baseline_y),
+                    font,
+                    0.42,
+                    (255, 255, 255),
+                    3,
+                    cv2.LINE_AA,
+                )
+                cv2.putText(
+                    rendered,
+                    label,
+                    (x, baseline_y),
+                    font,
+                    0.42,
+                    object_color,
+                    1,
+                    cv2.LINE_AA,
+                )
+                cv2.putText(
+                    rendered,
+                    "2",
+                    (x + label_width + 1, baseline_y - 4),
+                    font,
+                    0.30,
+                    (255, 255, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+                cv2.putText(
+                    rendered,
+                    "2",
+                    (x + label_width + 1, baseline_y - 4),
+                    font,
+                    0.30,
+                    object_color,
+                    1,
+                    cv2.LINE_AA,
+                )
             if show_foot_points:
                 cv2.circle(rendered, detection.foot_point, 5, object_color, -1)
 
