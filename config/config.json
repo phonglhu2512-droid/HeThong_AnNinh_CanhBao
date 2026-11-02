@@ -1,37 +1,68 @@
 {
   "video_source": {
-    "mode": "webcam",
+    "mode": "rtsp",
     "device_id": 1,
     "file_path": "C:/0_Data/02_PROJECTS/TGMT/1102.mp4",
-    "rtsp_url": "",
+    "rtsp_url": "rtsp://admin:L210B45E@192.168.101.251:554/cam/realmonitor?channel=1&subtype=0",
     "port": 554,
-    "username": "",
-    "password": "",
-    "profile": "ONVIF"
+    "username": "admin",
+    "password": "L210B45E",
+    "profile": "Dahua"
   },
   "roi_points": [
     [
-      366,
-      244
+      393,
+      128
     ],
     [
-      576,
-      241
+      457,
+      139
     ],
     [
-      550,
-      334
+      460,
+      344
     ],
     [
-      354,
-      327
+      372,
+      358
+    ],
+    [
+      263,
+      347
+    ],
+    [
+      314,
+      119
     ]
   ],
-  "occlusion_polygons": [],
+  "occlusion_polygons": [
+    [
+      [
+        400,
+        136
+      ],
+      [
+        396,
+        166
+      ],
+      [
+        449,
+        176
+      ],
+      [
+        452,
+        150
+      ],
+      [
+        404,
+        135
+      ]
+    ]
+  ],
   "display_overlays": {
     "bounding_box": true,
     "foot_point": true
   },
   "min_area": 1500,
-  "violation_delay": 0.8
+  "violation_delay": 0.4
 }
