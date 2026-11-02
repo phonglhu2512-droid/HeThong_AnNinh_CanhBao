@@ -14,24 +14,41 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 import cv2
 import numpy as np
-from PyQt6.QtCore import QPointF, QRectF, QTime, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import (
+    QAbstractAnimation,
+    QEvent,
+    QEasingCurve,
+    QObject,
+    QPointF,
+    QRectF,
+    QTime,
+    Qt,
+    QTimer,
+    QPropertyAnimation,
+    pyqtSignal,
+)
 from PyQt6.QtGui import (
     QCloseEvent,
     QColor,
     QImage,
+    QMouseEvent,
     QPainter,
     QPainterPath,
     QPen,
     QPixmap,
 )
 from PyQt6.QtWidgets import (
-    QAbstractItemView,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGraphicsBlurEffect,
+    QGraphicsColorizeEffect,
+    QGraphicsDropShadowEffect,
+    QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -43,8 +60,7 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSlider,
     QSplitter,
-    QTableWidget,
-    QTableWidgetItem,
+    QSizePolicy,
     QTimeEdit,
     QVBoxLayout,
     QWidget,
@@ -94,6 +110,32 @@ class VideoCanvas(QWidget):
         super().__init__(parent)
         self._image: QImage | None = None
         self._hud_lines: tuple[str, str] = ("", "")
+        self._roi_drawing_banner_visible: bool = False
+        self._roi_banner = QLabel(
+            "CHẾ ĐỘ VẼ VÙNG CẤM: Click chuột trực tiếp lên mặt sàn "
+            "để chấm các đỉnh đa giác mới (Tối thiểu 3 điểm)",
+            self,
+        )
+        self._roi_banner.setObjectName("roiDrawingBanner")
+        self._roi_banner.setWordWrap(True)
+        self._roi_banner.setFixedHeight(48)
+        self._roi_banner.setMaximumWidth(500)
+        self._roi_banner.hide()
+        self._roi_banner_opacity = QGraphicsOpacityEffect(self._roi_banner)
+        self._roi_banner_opacity.setOpacity(0.0)
+        self._roi_banner.setGraphicsEffect(self._roi_banner_opacity)
+        self._roi_banner_animation = QPropertyAnimation(
+            self._roi_banner_opacity,
+            b"opacity",
+            self,
+        )
+        self._roi_banner_animation.setDuration(200)
+        self._roi_banner_animation.setEasingCurve(
+            QEasingCurve.Type.OutCubic
+        )
+        self._roi_banner_animation.finished.connect(
+            self._finish_roi_banner_animation
+        )
         self._roi_points: list[ROIPoint] = []
         self._draft_roi_points: list[ROIPoint] = []
         self._editing_roi: bool = False
@@ -128,12 +170,50 @@ class VideoCanvas(QWidget):
             QImage.Format.Format_RGB888,
         )
         self._image = image.copy()
+        self._position_roi_banner()
         self.update()
 
     def set_hud_lines(self, first_line: str, second_line: str) -> None:
         """Cập nhật hai dòng HUD phủ trên góc video."""
         self._hud_lines = (first_line, second_line)
         self.update()
+
+    def set_roi_drawing_banner(self, visible: bool) -> None:
+        """Hiện hoặc ẩn banner hướng dẫn vẽ ROI bằng animation opacity."""
+        self._roi_drawing_banner_visible = visible
+        self._position_roi_banner()
+        self._roi_banner_animation.stop()
+        if visible:
+            self._roi_banner.show()
+        self._roi_banner_animation.setStartValue(
+            self._roi_banner_opacity.opacity()
+        )
+        self._roi_banner_animation.setEndValue(1.0 if visible else 0.0)
+        self._roi_banner_animation.start()
+
+    def _position_roi_banner(self) -> None:
+        """Đặt banner cạnh HUD trong vùng ảnh letterbox hiện tại."""
+        image_rect = self._image_rect()
+        if image_rect.isEmpty():
+            return
+        width = min(500, max(0, int(image_rect.width()) - 20))
+        if width <= 0:
+            return
+        self._roi_banner.setFixedWidth(width)
+        self._roi_banner.move(
+            round(image_rect.x() + 10),
+            round(image_rect.y() + 76),
+        )
+
+    def _finish_roi_banner_animation(self) -> None:
+        """Ẩn banner sau fade-out nếu trạng thái vẫn là không hoạt động."""
+        if not self._roi_drawing_banner_visible:
+            self._roi_banner.hide()
+
+    def resizeEvent(self, event: object) -> None:
+        """Giữ banner đúng vị trí khi kích thước viewport thay đổi."""
+        super().resizeEvent(event)
+        self._position_roi_banner()
 
     def set_roi_overlay(
         self,
@@ -208,6 +288,7 @@ class VideoCanvas(QWidget):
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         painter.fillRect(self.rect(), QColor("#17191D"))
 
         if self._image is None:
@@ -966,14 +1047,19 @@ class SnapshotCardWidget(QFrame):
         super().__init__(parent)
         self._event = event
         self.setObjectName("snapshotCard")
-        self.setFixedSize(180, 138)
+        self.setFixedSize(155, 125)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(18)
+        shadow.setOffset(0, 4)
+        shadow.setColor(QColor(15, 23, 42, 18))
+        self.setGraphicsEffect(shadow)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(7, 7, 7, 7)
-        layout.setSpacing(5)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
 
         image_container = QWidget()
-        image_container.setFixedSize(164, 84)
+        image_container.setFixedSize(141, 76)
         image_container.setAttribute(
             Qt.WidgetAttribute.WA_TransparentForMouseEvents
         )
@@ -982,18 +1068,33 @@ class SnapshotCardWidget(QFrame):
         image = QLabel()
         image.setObjectName("snapshotThumbnail")
         image.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        image.setFixedSize(164, 84)
+        image.setFixedSize(141, 76)
         pixmap = QPixmap(str(event.image_path))
         if pixmap.isNull():
             image.setText("Không đọc được ảnh")
         else:
-            image.setPixmap(
-                pixmap.scaled(
-                    image.size(),
-                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
+            scaled = pixmap.scaled(
+                image.size(),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
             )
+            rounded = QPixmap(image.size())
+            rounded.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(rounded)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(
+                QPainter.RenderHint.SmoothPixmapTransform
+            )
+            clip_path = QPainterPath()
+            clip_path.addRoundedRect(
+                QRectF(rounded.rect()),
+                8,
+                8,
+            )
+            painter.setClipPath(clip_path)
+            painter.drawPixmap(0, 0, scaled)
+            painter.end()
+            image.setPixmap(rounded)
         image.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         image_layout.addWidget(image, 0, 0)
         badge = QLabel(f"[Ảnh {event.occurred_at:%H:%M:%S}]")
@@ -1037,6 +1138,117 @@ class SnapshotCardWidget(QFrame):
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+
+class AuditEventRowWidget(QFrame):
+    """Một dòng nhật ký vi phạm gọn, bo góc và mở được ảnh bằng chứng."""
+
+    activated = pyqtSignal(object)
+
+    def __init__(
+        self,
+        event: AuditEvent,
+        parent: QWidget | None = None,
+    ) -> None:
+        """Tạo dòng nhật ký với thời gian, trạng thái, thời lượng và tọa độ."""
+        super().__init__(parent)
+        self._event = event
+        self.setObjectName("auditEventRow")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(42)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 4, 10, 4)
+        layout.setSpacing(6)
+
+        marker = QLabel("●")
+        marker.setObjectName("auditEventMarker")
+        layout.addWidget(marker)
+        timestamp = QLabel(event.occurred_at.strftime("%H:%M:%S"))
+        timestamp.setObjectName("auditEventTime")
+        layout.addWidget(timestamp)
+        badge = QLabel("Xâm phạm")
+        badge.setObjectName("auditEventBadge")
+        layout.addWidget(badge)
+        duration = QLabel(f"{event.violation_duration:.1f}s")
+        duration.setObjectName("auditEventDuration")
+        layout.addWidget(duration)
+        point = QLabel(f"Foot({event.foot_point[0]}, {event.foot_point[1]})")
+        point.setObjectName("auditEventPoint")
+        layout.addWidget(point, 1)
+        for label in self.findChildren(QLabel):
+            label.setAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents
+            )
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        """Mở ảnh bằng chứng khi người dùng double-click dòng sự kiện."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.activated.emit(self._event)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
+class AnimatedSnapshotCard(QWidget):
+    """Khung thẻ Snapshot kết hợp đổ bóng và fade-in 200 ms."""
+
+    def __init__(
+        self,
+        card: SnapshotCardWidget,
+        parent: QWidget | None = None,
+    ) -> None:
+        """Tạo wrapper để shadow và opacity effect không ghi đè nhau."""
+        super().__init__(parent)
+        self.setObjectName("snapshotCardEntry")
+        self.setFixedSize(175, 145)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        fade_container = QWidget(self)
+        fade_layout = QVBoxLayout(fade_container)
+        fade_layout.setContentsMargins(0, 0, 0, 0)
+        fade_layout.addWidget(card, 0, Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(fade_container)
+
+        self._opacity_effect = QGraphicsOpacityEffect()
+        self._opacity_effect.setOpacity(0.0)
+        fade_container.setGraphicsEffect(self._opacity_effect)
+        self._fade_animation = QPropertyAnimation(
+            self._opacity_effect,
+            b"opacity",
+            self,
+        )
+        self._fade_animation.setDuration(200)
+        self._fade_animation.setStartValue(0.0)
+        self._fade_animation.setEndValue(1.0)
+        self._fade_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._fade_animation.start()
+
+
+class SafetyShieldIcon(QWidget):
+    """Vẽ icon khiên vector để không phụ thuộc glyph của font hệ thống."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        """Tạo biểu tượng khiên đỏ nhạt kích thước cố định."""
+        super().__init__(parent)
+        self.setFixedSize(24, 24)
+
+    def paintEvent(self, event: object) -> None:
+        """Vẽ nền khiên hồng nhạt và viền đỏ bằng vector."""
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        path = QPainterPath()
+        path.moveTo(12, 2)
+        path.lineTo(21, 5)
+        path.lineTo(20, 12)
+        path.quadTo(18, 19, 12, 22)
+        path.quadTo(6, 19, 4, 12)
+        path.lineTo(3, 5)
+        path.closeSubpath()
+        painter.setBrush(QColor("#FFE4E6"))
+        painter.setPen(QPen(QColor("#F43F5E"), 1.5))
+        painter.drawPath(path)
 
 
 class HMIMainWindow(QMainWindow):
@@ -1092,7 +1304,7 @@ class HMIMainWindow(QMainWindow):
         self._setup_mode = False
         self._filtered_events: list[AuditEvent] = audit_logger.get_events()
         self._carousel_fingerprint: tuple[tuple[str, bool, float], ...] = ()
-        self._audit_table_fingerprint: tuple[tuple[str, float], ...] = ()
+        self._audit_rows_fingerprint: tuple[tuple[str, float], ...] = ()
         self._last_canvas_state: tuple[SafetyState, StreamState, bool] | None = None
         self._shutdown_complete = False
 
@@ -1103,6 +1315,9 @@ class HMIMainWindow(QMainWindow):
         self.camera_test_completed.connect(self._on_camera_test_completed)
         self._build_ui()
         self._apply_styles()
+        self._apply_card_shadows()
+        self._setup_progress_animation()
+        self._install_button_hover_effects()
         self._load_source_form()
 
         self._worker = _CVSafetyWorker(
@@ -1219,7 +1434,7 @@ class HMIMainWindow(QMainWindow):
         layout.addWidget(self._mode_button)
 
         self._connect_camera_button = QPushButton("Kết nối Camera IP")
-        self._connect_camera_button.setObjectName("primaryButton")
+        self._connect_camera_button.setObjectName("connectCameraButton")
         self._connect_camera_button.clicked.connect(self._open_camera_dialog)
         layout.addWidget(self._connect_camera_button)
         return header
@@ -1241,11 +1456,17 @@ class HMIMainWindow(QMainWindow):
         video_layout.setSpacing(8)
 
         title_row = QHBoxLayout()
-        title_row.addWidget(QLabel("LIVE STREAM"))
-        title_row.addStretch(1)
-        self._roi_hint = QLabel("ROI: ĐÃ LƯU")
-        self._roi_hint.setObjectName("muted")
-        title_row.addWidget(self._roi_hint)
+        live_badge = QLabel("● LIVE RTSP STREAM")
+        live_badge.setObjectName("liveStreamBadge")
+        title_row.addWidget(live_badge)
+        live_title = QLabel(
+            "Góc nhìn thực tế từ Mắt Camera IP — "
+            "Khu vực Máy Dập Thủy Lực #01"
+        )
+        live_title.setObjectName("liveCameraTitle")
+        live_title.setWordWrap(True)
+        title_row.addWidget(live_title, 1)
+        title_row.addWidget(self._build_display_mode_selector())
         video_layout.addLayout(title_row)
 
         self._canvas = VideoCanvas()
@@ -1255,8 +1476,6 @@ class HMIMainWindow(QMainWindow):
         video_layout.addWidget(self._canvas, 1)
         self._roi_controls = self._build_roi_controls()
         video_layout.addWidget(self._roi_controls)
-        self._occlusion_controls = self._build_occlusion_controls()
-        video_layout.addWidget(self._occlusion_controls)
         splitter.addWidget(video_panel)
         splitter.addWidget(self._build_side_panel())
         splitter.setStretchFactor(0, 7)
@@ -1265,7 +1484,7 @@ class HMIMainWindow(QMainWindow):
         return splitter
 
     def _build_roi_controls(self) -> QWidget:
-        """Tạo đúng ba nút thao tác ROI theo quy trình hiệu chuẩn.
+        """Tạo một hàng mask máy và ROI cho thao tác hiệu chuẩn.
 
         Args:
             None.
@@ -1274,49 +1493,101 @@ class HMIMainWindow(QMainWindow):
             Widget thanh nút hiệu chuẩn ROI.
         """
         controls = QWidget()
+        controls.setFixedHeight(36)
         layout = QHBoxLayout(controls)
         layout.setContentsMargins(0, 0, 0, 0)
+
+        self._roi_hint = QLabel("ROI: ĐÃ LƯU")
+        self._roi_hint.setObjectName("muted")
+        layout.addWidget(self._roi_hint)
+        self._draw_occlusion_button = QPushButton("Vẽ che máy")
+        self._draw_occlusion_button.setObjectName("maskButton")
+        self._draw_occlusion_button.clicked.connect(
+            self._start_occlusion_draft
+        )
+        self._save_occlusion_button = QPushButton("Lưu mask")
+        self._save_occlusion_button.setObjectName("maskButton")
+        self._save_occlusion_button.clicked.connect(
+            self._save_occlusion_polygon
+        )
+        self._clear_occlusion_button = QPushButton("Xóa mask")
+        self._clear_occlusion_button.setObjectName("maskButton")
+        self._clear_occlusion_button.clicked.connect(
+            self._clear_occlusion_polygons
+        )
+        for button in (
+            self._draw_occlusion_button,
+            self._save_occlusion_button,
+            self._clear_occlusion_button,
+        ):
+            button.setFixedHeight(30)
+            button.setSizePolicy(
+                QSizePolicy.Policy.Fixed,
+                QSizePolicy.Policy.Fixed,
+            )
+            layout.addWidget(button)
+
+        layout.addStretch(1)
         self._draw_roi_button = QPushButton(
             "Vẽ lại Vùng cấm (Click chuột)"
         )
         self._delete_roi_point_button = QPushButton("Xóa điểm")
         self._default_roi_button = QPushButton("Mặc định")
-        self._draw_roi_button.setObjectName("primaryButton")
+        self._draw_roi_button.setObjectName("roiDrawButton")
         self._draw_roi_button.clicked.connect(self._toggle_roi_drawing)
         self._delete_roi_point_button.clicked.connect(self._delete_roi_point)
         self._default_roi_button.clicked.connect(self._restore_default_roi)
+        self._delete_roi_point_button.setObjectName("roiUtilityButton")
+        self._default_roi_button.setObjectName("roiUtilityButton")
         for button in (
             self._draw_roi_button,
             self._delete_roi_point_button,
             self._default_roi_button,
         ):
-            button.setMinimumHeight(38)
-            layout.addWidget(button, 1)
+            button.setFixedHeight(30)
+            button.setSizePolicy(
+                QSizePolicy.Policy.Fixed,
+                QSizePolicy.Policy.Fixed,
+            )
+            layout.addWidget(button)
         return controls
 
-    def _build_occlusion_controls(self) -> QWidget:
-        """Tạo nhóm hiệu chuẩn mask máy riêng, không lẫn với ba nút ROI."""
+    def _build_display_mode_selector(self) -> QWidget:
+        """Tạo cụm chuyển chế độ xem trong header của khung video."""
         controls = QWidget()
+        controls.setObjectName("displayModeSelector")
+        controls.setFixedHeight(30)
         layout = QHBoxLayout(controls)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(QLabel("MASK THÂN MÁY"))
-        self._draw_occlusion_button = QPushButton("Vẽ vùng che máy")
-        self._undo_occlusion_button = QPushButton("Undo mask")
-        self._save_occlusion_button = QPushButton("Lưu mask")
-        self._clear_occlusion_button = QPushButton("Xóa mask")
-        self._save_occlusion_button.setObjectName("secondaryButton")
-        self._draw_occlusion_button.clicked.connect(self._start_occlusion_draft)
-        self._undo_occlusion_button.clicked.connect(self._undo_occlusion_point)
-        self._save_occlusion_button.clicked.connect(self._save_occlusion_polygon)
-        self._clear_occlusion_button.clicked.connect(self._clear_occlusion_polygons)
-        for button in (
-            self._draw_occlusion_button,
-            self._undo_occlusion_button,
-            self._save_occlusion_button,
-            self._clear_occlusion_button,
-        ):
+        layout.setContentsMargins(3, 2, 3, 2)
+        layout.setSpacing(2)
+        self._display_mode_group = QButtonGroup(self)
+        self._display_mode_group.setExclusive(True)
+        self._display_button_shadows: dict[
+            QPushButton,
+            QGraphicsDropShadowEffect,
+        ] = {}
+        self._display_mode_buttons: list[QPushButton] = []
+        modes = (
+            ("RGB Thực tế", DisplayMode.RGB),
+            ("MOG2 Mask (Trừ nền)", DisplayMode.MOG2_MASK),
+            ("Canny Edge (Tách biên)", DisplayMode.CANNY_EDGE),
+        )
+        for index, (label, mode) in enumerate(modes):
+            button = QPushButton(label)
+            button.setObjectName("displayModeButton")
+            button.setCheckable(True)
+            button.setFixedHeight(26)
+            button.setChecked(index == 0)
+            self._display_mode_group.addButton(button, index)
+            self._display_mode_buttons.append(button)
+            button.clicked.connect(
+                lambda checked=False, selected_mode=mode: (
+                    self._set_display_mode(selected_mode)
+                    if checked
+                    else None
+                )
+            )
             layout.addWidget(button)
-        layout.addStretch(1)
         return controls
 
     def _build_side_panel(self) -> QWidget:
@@ -1339,6 +1610,9 @@ class HMIMainWindow(QMainWindow):
         operations_layout.setContentsMargins(12, 10, 12, 10)
         operations_layout.setSpacing(8)
         state_header = QHBoxLayout()
+        shield_icon = SafetyShieldIcon()
+        shield_icon.setObjectName("safetyShieldIcon")
+        state_header.addWidget(shield_icon)
         state_title = QLabel("1. BẢNG THÔNG SỐ VẬN HÀNH")
         state_title.setObjectName("cardTitle")
         state_title.setWordWrap(True)
@@ -1349,21 +1623,31 @@ class HMIMainWindow(QMainWindow):
         state_header.addWidget(self._safety_badge)
         operations_layout.addLayout(state_header)
 
-        metric_grid = QGridLayout()
-        metric_grid.setSpacing(6)
-        self._people_value = QLabel("00")
-        self._shift_alarms_value = QLabel("00")
+        metric_row = QHBoxLayout()
+        metric_row.setSpacing(6)
+        self._people_value = QLabel("00 người")
+        self._shift_alarms_value = QLabel("00 ca")
         self._machine_state_value = QLabel("ĐANG CHẠY")
         self._add_metric_box(
-            metric_grid, 0, "NGƯỜI TRONG KHUNG", self._people_value
+            metric_row,
+            "NGƯỜI TRONG KHUNG",
+            self._people_value,
+            "metricBox",
         )
         self._add_metric_box(
-            metric_grid, 1, "CẢNH BÁO CA NÀY", self._shift_alarms_value
+            metric_row,
+            "CẢNH BÁO CA NÀY",
+            self._shift_alarms_value,
+            "alarmMetricBox",
         )
         self._add_metric_box(
-            metric_grid, 2, "TRẠNG THÁI MÁY", self._machine_state_value
+            metric_row,
+            "MÁY DẬP #01",
+            self._machine_state_value,
+            "metricBox",
         )
-        operations_layout.addLayout(metric_grid)
+        self._machine_state_value.setObjectName("metricValueSafe")
+        operations_layout.addLayout(metric_row)
         self._intrusion_buffer_label = QLabel(
             "Bộ đệm thời gian xâm nhập: 0.00s / 0.80s"
         )
@@ -1410,7 +1694,8 @@ class HMIMainWindow(QMainWindow):
         tuning_layout.addWidget(self._min_area_slider)
         tuning_layout.addWidget(self._min_area_value)
         reset_parameters_button = QPushButton("Reset chuẩn")
-        reset_parameters_button.setObjectName("secondaryButton")
+        reset_parameters_button.setObjectName("resetParametersButton")
+        reset_parameters_button.setFixedHeight(28)
         reset_parameters_button.clicked.connect(self._reset_standard_parameters)
         tuning_layout.addWidget(reset_parameters_button)
         self._tuning_save_timer = QTimer(self)
@@ -1445,12 +1730,6 @@ class HMIMainWindow(QMainWindow):
         )
         overlay_layout.addWidget(self._show_bounding_box_checkbox)
         overlay_layout.addWidget(self._show_foot_point_checkbox)
-        self._display_combo = QComboBox()
-        self._display_combo.addItem("RGB Thực tế", DisplayMode.RGB)
-        self._display_combo.addItem("MOG2 Mask", DisplayMode.MOG2_MASK)
-        self._display_combo.addItem("Canny Edge", DisplayMode.CANNY_EDGE)
-        self._display_combo.currentIndexChanged.connect(self._on_display_changed)
-        overlay_layout.addWidget(self._display_combo)
         layout.addWidget(overlay_card)
         layout.addStretch(1)
         self._refresh_slider_labels()
@@ -1465,24 +1744,30 @@ class HMIMainWindow(QMainWindow):
 
     @staticmethod
     def _add_metric_box(
-        layout: QGridLayout,
-        column: int,
+        layout: QHBoxLayout,
         title: str,
         value_label: QLabel,
+        object_name: str,
     ) -> None:
-        """Đặt một chỉ số vận hành trong ô nền trung tính."""
+        """Đặt một chỉ số vận hành trong ô cố định chiều cao trên hàng ngang."""
         box = QFrame()
-        box.setObjectName("metricBox")
+        box.setObjectName(object_name)
+        box.setFixedHeight(72)
+        box.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
         box_layout = QVBoxLayout(box)
-        box_layout.setContentsMargins(8, 6, 8, 6)
+        box_layout.setContentsMargins(8, 7, 8, 6)
         box_layout.setSpacing(2)
         caption = QLabel(title)
         caption.setObjectName("metricCaption")
         caption.setWordWrap(True)
         value_label.setObjectName("metricValue")
+        value_label.setWordWrap(True)
         box_layout.addWidget(caption)
         box_layout.addWidget(value_label)
-        layout.addWidget(box, column, 0)
+        layout.addWidget(box, 1)
 
     def _build_camera_connection_dialog(self) -> QDialog:
         """Tạo modal cấu hình Webcam, file video hoặc RTSP camera."""
@@ -1609,7 +1894,7 @@ class HMIMainWindow(QMainWindow):
         return dialog
 
     def _build_bottom_dock(self) -> QWidget:
-        """Tạo Snapshot Carousel bên trái và bộ lọc/bảng audit bên phải.
+        """Tạo dock Snapshot Carousel và nhật ký sự kiện dạng row mềm mại.
 
         Args:
             None.
@@ -1617,13 +1902,24 @@ class HMIMainWindow(QMainWindow):
         Returns:
             Widget Bottom Dock theo tỷ lệ carousel 60%, nhật ký 40%.
         """
+        dock = QWidget()
+        dock_layout = QVBoxLayout(dock)
+        dock_layout.setContentsMargins(0, 0, 0, 0)
+        dock_layout.setSpacing(6)
+        dock_title = QLabel(
+            "● [BOTTOM DOCK]: LỊCH SỬ VI PHẠM & BẰNG CHỨNG HÌNH ẢNH "
+            "(SNAPSHOT CAROUSEL)"
+        )
+        dock_title.setObjectName("bottomDockTitle")
+        dock_layout.addWidget(dock_title)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
         carousel_panel = QFrame()
         carousel_panel.setObjectName("panel")
         carousel_layout = QVBoxLayout(carousel_panel)
         carousel_layout.setContentsMargins(14, 12, 14, 12)
         title_row = QHBoxLayout()
-        title_row.addWidget(QLabel("BẰNG CHỨNG GẦN ĐÂY"))
+        title_row.addWidget(QLabel("BẰNG CHỨNG HÌNH ẢNH"))
         self._snapshot_count = QLabel("0 ảnh")
         self._snapshot_count.setObjectName("muted")
         title_row.addStretch(1)
@@ -1649,16 +1945,17 @@ class HMIMainWindow(QMainWindow):
         splitter.setStretchFactor(0, 6)
         splitter.setStretchFactor(1, 4)
         splitter.setSizes([720, 480])
-        return splitter
+        dock_layout.addWidget(splitter, 1)
+        return dock
 
     def _build_audit_panel(self) -> QWidget:
-        """Tạo bộ lọc ca/giờ, bảng sự kiện và nút xuất báo cáo.
+        """Tạo bộ lọc ca/giờ, danh sách sự kiện và nút xuất báo cáo.
 
         Args:
             None.
 
         Returns:
-            Widget bảng nhật ký và thao tác báo cáo.
+            Widget nhật ký dạng dòng và thao tác báo cáo.
         """
         panel = QFrame()
         panel.setObjectName("panel")
@@ -1684,24 +1981,22 @@ class HMIMainWindow(QMainWindow):
         filter_row.addWidget(QLabel("–"))
         filter_row.addWidget(self._end_time_edit)
         self._apply_filter_button = QPushButton("Lọc")
+        self._apply_filter_button.setObjectName("filterButton")
         self._apply_filter_button.clicked.connect(self._apply_audit_filter)
         filter_row.addWidget(self._apply_filter_button)
         layout.addLayout(filter_row)
 
-        self._audit_table = QTableWidget(0, 4)
-        self._audit_table.setHorizontalHeaderLabels(
-            ["Mã", "Thời gian", "Vi phạm", "Tọa độ chân"]
+        self._audit_scroll = QScrollArea()
+        self._audit_scroll.setWidgetResizable(True)
+        self._audit_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
-        self._audit_table.setSelectionBehavior(
-            QAbstractItemView.SelectionBehavior.SelectRows
-        )
-        self._audit_table.setEditTriggers(
-            QAbstractItemView.EditTrigger.NoEditTriggers
-        )
-        self._audit_table.setAlternatingRowColors(True)
-        self._audit_table.horizontalHeader().setStretchLastSection(True)
-        self._audit_table.cellDoubleClicked.connect(self._on_table_double_clicked)
-        layout.addWidget(self._audit_table, 1)
+        self._audit_rows_widget = QWidget()
+        self._audit_rows_layout = QVBoxLayout(self._audit_rows_widget)
+        self._audit_rows_layout.setContentsMargins(2, 2, 2, 2)
+        self._audit_rows_layout.setSpacing(5)
+        self._audit_scroll.setWidget(self._audit_rows_widget)
+        layout.addWidget(self._audit_scroll, 1)
 
         footer = QHBoxLayout()
         self._audit_count = QLabel("0 sự kiện")
@@ -1709,7 +2004,8 @@ class HMIMainWindow(QMainWindow):
         footer.addWidget(self._audit_count)
         footer.addStretch(1)
         self._export_button = QPushButton("Xuất File Báo Cáo CSV")
-        self._export_button.setObjectName("primaryButton")
+        self._export_button.setObjectName("exportButton")
+        self._export_button.setFixedHeight(34)
         self._export_button.clicked.connect(self._export_csv)
         footer.addWidget(self._export_button)
         layout.addLayout(footer)
@@ -1765,6 +2061,25 @@ class HMIMainWindow(QMainWindow):
                 font-size: 11pt;
                 font-weight: 700;
             }
+            QLabel#liveStreamBadge {
+                color: #FFFFFF;
+                background: #9B1B30;
+                border-radius: 14px;
+                padding: 5px 10px;
+                font-size: 8pt;
+                font-weight: 800;
+            }
+            QLabel#liveCameraTitle {
+                color: #334155;
+                font-size: 10pt;
+                font-weight: 800;
+            }
+            QLabel#bottomDockTitle {
+                color: #334155;
+                font-weight: 800;
+                padding: 2px 4px;
+            }
+            QWidget#safetyShieldIcon { background: transparent; }
             QLabel#cardTitle {
                 color: #334155;
                 font-weight: 800;
@@ -1773,61 +2088,183 @@ class HMIMainWindow(QMainWindow):
             QLabel#sourceStatusOnline { color: #10B981; font-weight: 700; }
             QLabel#sourceStatusError { color: #B45309; font-weight: 700; }
             QLabel#statusSafe, QLabel#statusWarning, QLabel#statusAlarm {
-                padding: 5px 10px;
-                border-radius: 8px;
+                padding: 4px 10px;
+                border-radius: 13px;
                 font-weight: 700;
             }
-            QLabel#statusSafe { color: #FFFFFF; background: #10B981; }
+            QLabel#statusSafe { color: #059669; background: #D1FAE5; }
             QLabel#statusWarning { color: #B45309; background: #FEF3C7; }
-            QLabel#statusAlarm { color: #FFFFFF; background: #E11D48; }
+            QLabel#statusAlarm { color: #E11D48; background: #FFE4E6; }
             QLabel#videoCanvas {
                 border: 1px solid #CBD5E1;
                 border-radius: 10px;
             }
+            QWidget#displayModeSelector {
+                background: #F1F5F9;
+                border: 0;
+                border-radius: 15px;
+            }
+            QPushButton#displayModeButton {
+                color: #475569;
+                background-color: #F1F5F9;
+                border: 0;
+                border-radius: 12px;
+                min-height: 0;
+                padding: 0 8px;
+                font-size: 8pt;
+                font-weight: 700;
+            }
+            QPushButton#displayModeButton:checked {
+                color: #9B1B30;
+                background-color: #FFFFFF;
+            }
+            QPushButton#displayModeButton:hover {
+                color: #9B1B30;
+                background-color: #FFFFFF;
+            }
             QPushButton, QToolButton, QComboBox, QLineEdit, QTimeEdit {
+                color: #1E293B;
                 min-height: 32px;
                 border: 1px solid #CBD5E1;
                 border-radius: 9px;
                 padding: 4px 9px;
-                background: #FFFFFF;
+                background-color: #FFFFFF;
             }
             QPushButton:hover, QToolButton:hover { border-color: #9B1B30; }
-            QPushButton:disabled { color: #94A3B8; background: #F1F5F9; }
-            QPushButton#primaryButton {
+            QPushButton:disabled { color: #94A3B8; }
+            QPushButton#primaryButton, QPushButton#connectCameraButton {
                 color: #FFFFFF;
-                background: #9B1B30;
+                background-color: #9B1B30;
                 border: 0;
+                border-radius: 14px;
                 font-weight: 700;
-                padding: 7px 11px;
+                padding: 6px 16px;
             }
-            QPushButton#primaryButton:hover { background: #7F1427; }
-            QPushButton#ackButton {
+            QPushButton#primaryButton:hover { background-color: #7F1427; }
+            QPushButton#connectCameraButton:hover {
+                background-color: #7F1D1D;
+            }
+            QPushButton#exportButton {
                 color: #FFFFFF;
-                background: #D97706;
+                background-color: #9B1B30;
                 border: 0;
-                border-radius: 9px;
+                border-radius: 17px;
+                padding: 0 14px;
                 font-weight: 800;
             }
-            QPushButton#ackButton:hover { background: #B45309; }
-            QPushButton#ackButton:disabled {
-                color: #94A3B8;
-                background: #E2E8F0;
-            }
-            QPushButton#modeButton:checked {
+            QPushButton#exportButton:hover { background-color: #7F1427; }
+            QPushButton#ackButton {
                 color: #FFFFFF;
-                background: #334155;
+                background-color: #D97706;
+                border: 0;
+                border-radius: 14px;
+                font-weight: bold;
+                padding: 6px 16px;
             }
-            QPushButton#secondaryButton {
-                color: #334155;
-                background: #F8FAFC;
+            QPushButton#ackButton:hover { background-color: #B45309; }
+            QPushButton#ackButton:disabled {
+                color: #FFFFFF;
+                background-color: #D97706;
+            }
+            QPushButton#modeButton, QPushButton#modeButton:checked {
+                color: #1E293B;
+                background-color: #FFFFFF;
                 border: 1px solid #CBD5E1;
+                border-radius: 14px;
+                padding: 6px 16px;
+            }
+            QPushButton#modeButton:hover {
+                background-color: #F8FAFC;
+            }
+            QPushButton#secondaryButton,
+            QPushButton#resetParametersButton {
+                color: #475569;
+                background-color: #F8FAFC;
+                border: 1px solid #CBD5E1;
+                border-radius: 8px;
+            }
+            QPushButton#resetParametersButton {
+                min-height: 0;
+                max-height: 28px;
+                padding: 0 10px;
+            }
+            QPushButton#resetParametersButton:hover {
+                color: #1E293B;
+                background-color: #F1F5F9;
+            }
+            QPushButton#roiDrawButton, QPushButton#roiDrawActiveButton,
+            QPushButton#roiUtilityButton {
+                min-height: 28px;
+                max-height: 28px;
+                padding: 0 16px;
+                border-radius: 15px;
+                font-size: 8pt;
+                font-weight: 700;
+            }
+            QPushButton#roiDrawButton {
+                color: #9B1B30;
+                background-color: #FDF2F4;
+                border: 1px solid #FECDD3;
+                padding: 0 14px;
+            }
+            QPushButton#roiDrawButton:hover {
+                background-color: #FCE7F3;
+            }
+            QPushButton#roiDrawActiveButton {
+                color: #FFFFFF;
+                background-color: #10B981;
+                border: 1px solid #10B981;
+            }
+            QPushButton#roiUtilityButton {
+                color: #334155;
+                background-color: #F8FAFC;
+                border: 1px solid #E2E8F0;
+                padding: 0 12px;
+            }
+            QPushButton#roiUtilityButton:hover {
+                background-color: #F1F5F9;
+            }
+            QPushButton#maskButton, QPushButton#maskDrawActiveButton {
+                color: #334155;
+                background-color: #F8FAFC;
+                border: 1px solid #CBD5E1;
+                border-radius: 15px;
+                padding: 0 12px;
+                min-height: 28px;
+                max-height: 28px;
+                font-size: 8pt;
+                font-weight: 700;
+            }
+            QPushButton#maskButton:hover {
+                background-color: #F1F5F9;
+                border-color: #94A3B8;
+            }
+            QPushButton#maskDrawActiveButton {
+                color: #3730A3;
+                background-color: #E0E7FF;
+                border: 1px solid #A5B4FC;
+            }
+            QPushButton#maskDrawActiveButton:hover {
+                background-color: #E0E7FF;
+                border-color: #A5B4FC;
+            }
+            QPushButton#filterButton {
+                color: #334155;
+                background-color: #F8FAFC;
+                border: 1px solid #CBD5E1;
+                border-radius: 6px;
+                padding: 4px 12px;
+            }
+            QPushButton#filterButton:hover {
+                background-color: #F1F5F9;
             }
             QLabel#metricCaption {
                 color: #64748B;
                 font-size: 7pt;
                 font-weight: 700;
             }
-            QLabel#metricValue {
+            QLabel#metricValue, QLabel#metricValueSafe,
+            QLabel#metricValueAlarm {
                 color: #0F172A;
                 font-size: 12pt;
                 font-weight: 800;
@@ -1835,8 +2272,19 @@ class HMIMainWindow(QMainWindow):
             QFrame#metricBox {
                 background: #F8FAFC;
                 border: 1px solid #E2E8F0;
-                border-radius: 9px;
+                border-radius: 12px;
             }
+            QFrame#alarmMetricBox {
+                background: #FFF1F2;
+                border: 1px solid #FECDD3;
+                border-radius: 12px;
+            }
+            QFrame#alarmMetricBox QLabel#metricCaption,
+            QFrame#alarmMetricBox QLabel#metricValue {
+                color: #9B1B30;
+            }
+            QLabel#metricValueSafe { color: #059669; }
+            QLabel#metricValueAlarm { color: #E11D48; }
             QLabel#snapshotBadge {
                 color: #FFFFFF;
                 background: #9B1B30;
@@ -1848,11 +2296,18 @@ class HMIMainWindow(QMainWindow):
             QFrame#snapshotCard {
                 background: #FFFFFF;
                 border: 1px solid #F3C7CE;
-                border-radius: 12px;
+                border-radius: 10px;
             }
             QFrame#snapshotCard:hover {
                 border: 1px solid #9B1B30;
                 background: #FFF8F8;
+            }
+            QLabel#roiDrawingBanner {
+                color: #FFFFFF;
+                background: #881337;
+                border-radius: 10px;
+                padding: 6px 10px;
+                font-weight: 700;
             }
             QLabel#snapshotThumbnail {
                 color: #64748B;
@@ -1893,17 +2348,29 @@ class HMIMainWindow(QMainWindow):
                 border-radius: 7px;
                 background: #9B1B30;
             }
-            QTableWidget {
+            QFrame#auditEventRow {
+                background: #F8FAFC;
                 border: 1px solid #E2E8F0;
-                border-radius: 9px;
-                gridline-color: #F1F5F9;
-                alternate-background-color: #F8FAFC;
-                background: #FFFFFF;
+                border-radius: 10px;
             }
-            QHeaderView::section {
-                background: #F1F5F9;
-                border: 0;
-                padding: 5px;
+            QFrame#auditEventRow:hover {
+                background: #FFF1F2;
+                border-color: #FECDD3;
+            }
+            QLabel#auditEventMarker { color: #9B1B30; font-size: 8pt; }
+            QLabel#auditEventTime,
+            QLabel#auditEventDuration,
+            QLabel#auditEventPoint {
+                color: #334155;
+                font-size: 8pt;
+                font-weight: 700;
+            }
+            QLabel#auditEventBadge {
+                color: #9B1B30;
+                background: #FFE4E6;
+                border-radius: 8px;
+                padding: 3px 6px;
+                font-size: 7pt;
                 font-weight: 700;
             }
             QProgressBar {
@@ -1915,9 +2382,84 @@ class HMIMainWindow(QMainWindow):
                 border-radius: 4px;
                 background: #D97706;
             }
+            QProgressBar[alarm="true"]::chunk {
+                background: #E11D48;
+            }
             QScrollArea { border: 0; background: transparent; }
             """
         )
+
+    def _apply_card_shadows(self) -> None:
+        """Áp dụng drop shadow nhất quán cho các panel trắng của HMI."""
+        for frame in self.findChildren(QFrame):
+            if frame.objectName() not in {"header", "panel", "controlCard"}:
+                continue
+            shadow = QGraphicsDropShadowEffect(frame)
+            shadow.setBlurRadius(18)
+            shadow.setOffset(0, 4)
+            shadow.setColor(QColor(15, 23, 42, 18))
+            frame.setGraphicsEffect(shadow)
+
+    def _setup_progress_animation(self) -> None:
+        """Tạo animation OutCubic cho thanh đệm xâm nhập."""
+        self._intrusion_progress_animation = QPropertyAnimation(
+            self._intrusion_progress,
+            b"value",
+            self,
+        )
+        self._intrusion_progress_animation.setDuration(140)
+        self._intrusion_progress_animation.setEasingCurve(
+            QEasingCurve.Type.OutCubic
+        )
+
+    def _install_button_hover_effects(self) -> None:
+        """Đảm bảo các nút không có graphics effect làm mờ chúng."""
+        self._button_hover_effects: dict[
+            QWidget,
+            tuple[QGraphicsColorizeEffect, QPropertyAnimation],
+        ] = {}
+        for button in self.findChildren(QPushButton):
+            button.setGraphicsEffect(None)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def _install_hover_effect(
+        self,
+        widget: QWidget,
+        effect_widget: QWidget | None = None,
+    ) -> None:
+        """Thêm hiệu ứng hover vào thumbnail, không gắn effect lên nút."""
+        color_target = effect_widget or widget
+        effect = QGraphicsColorizeEffect(color_target)
+        effect.setColor(QColor("#FFFFFF"))
+        effect.setStrength(0.0)
+        color_target.setGraphicsEffect(effect)
+        animation = QPropertyAnimation(effect, b"strength", widget)
+        animation.setDuration(140)
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._button_hover_effects[widget] = (effect, animation)
+        widget.installEventFilter(self)
+        widget.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        """Animate tint on hover/press for pills and Snapshot cards."""
+        target = getattr(self, "_button_hover_effects", {}).get(watched)
+        if target is not None and isinstance(watched, QWidget):
+            effect, animation = target
+            end_value: float | None = None
+            if event.type() == QEvent.Type.Enter:
+                end_value = 0.10
+            elif event.type() == QEvent.Type.Leave:
+                end_value = 0.0
+            elif event.type() == QEvent.Type.MouseButtonPress:
+                end_value = 0.17
+            elif event.type() == QEvent.Type.MouseButtonRelease:
+                end_value = 0.10 if watched.underMouse() else 0.0
+            if end_value is not None:
+                animation.stop()
+                animation.setStartValue(effect.strength())
+                animation.setEndValue(end_value)
+                animation.start()
+        return super().eventFilter(watched, event)
 
     def _load_source_form(self) -> None:
         """Nạp cấu hình nguồn vào modal cấu hình camera hiện hành.
@@ -1957,7 +2499,20 @@ class HMIMainWindow(QMainWindow):
 
     def _open_camera_dialog(self) -> None:
         """Hiển thị hộp thoại cấu hình camera ở chế độ modal."""
-        self._camera_dialog.exec()
+        self._exec_with_backdrop_blur(self._camera_dialog)
+
+    def _exec_with_backdrop_blur(self, dialog: QDialog) -> int:
+        """Làm mờ central widget trong thời gian modal và luôn gỡ effect."""
+        central_widget = self.centralWidget()
+        if central_widget is None:
+            return dialog.exec()
+        blur = QGraphicsBlurEffect(central_widget)
+        blur.setBlurRadius(12)
+        central_widget.setGraphicsEffect(blur)
+        try:
+            return dialog.exec()
+        finally:
+            central_widget.setGraphicsEffect(None)
 
     def _update_rtsp_preview(self, index: int | None = None) -> None:
         """Cập nhật chuỗi VideoCapture theo dữ liệu RTSP đang nhập."""
@@ -2241,15 +2796,20 @@ class HMIMainWindow(QMainWindow):
         )
         if not self._setup_mode:
             self._editing_occlusion = False
+            self._draft_occlusion_points = []
             self._drawing_roi = False
             self._draft_roi = []
+            self._set_mask_drawing_button(False)
             self._draw_roi_button.setText(
                 "Vẽ lại Vùng cấm (Click chuột)"
             )
+            self._draw_roi_button.setObjectName("roiDrawButton")
+        self._canvas.set_roi_drawing_banner(self._drawing_roi)
+        self._draw_roi_button.style().unpolish(self._draw_roi_button)
+        self._draw_roi_button.style().polish(self._draw_roi_button)
         self._refresh_canvas_overlay()
         for widget in (
             self._roi_controls,
-            self._occlusion_controls,
             self._min_area_slider,
             self._delay_slider,
         ):
@@ -2468,18 +3028,9 @@ class HMIMainWindow(QMainWindow):
         self._system_status.setText("ĐANG CHUYỂN NGUỒN…")
         self._camera_dialog.accept()
 
-    def _on_display_changed(self, index: int) -> None:
-        """Chuyển bộ lọc ảnh mà không dừng tiến trình kiểm tra an toàn.
-
-        Args:
-            index: Chỉ số chế độ RGB, MOG2 Mask hoặc Canny Edge.
-
-        Returns:
-            None.
-        """
-        mode = self._display_combo.itemData(index)
-        if isinstance(mode, DisplayMode):
-            self._worker.set_display_mode(mode)
+    def _set_display_mode(self, mode: DisplayMode) -> None:
+        """Chuyển chế độ hiển thị mà không dừng xử lý an toàn."""
+        self._worker.set_display_mode(mode)
 
     def _on_overlay_options_changed(self, checked: bool = False) -> None:
         """Áp dụng và lưu hai công tắc overlay độc lập."""
@@ -2625,8 +3176,14 @@ class HMIMainWindow(QMainWindow):
         if not self._drawing_roi:
             self._draft_roi = []
             self._editing_occlusion = False
+            self._draft_occlusion_points = []
+            self._set_mask_drawing_button(False)
             self._drawing_roi = True
-            self._draw_roi_button.setText("Xác nhận Vùng cấm mới")
+            self._draw_roi_button.setText("Hoàn tất Vẽ Vùng cấm")
+            self._draw_roi_button.setObjectName("roiDrawActiveButton")
+            self._draw_roi_button.style().unpolish(self._draw_roi_button)
+            self._draw_roi_button.style().polish(self._draw_roi_button)
+            self._canvas.set_roi_drawing_banner(True)
             self._refresh_canvas_overlay()
             self._roi_hint.setText("ĐANG VẼ ROI MỚI · CHẤM TỐI THIỂU 3 ĐỈNH")
             return
@@ -2656,6 +3213,10 @@ class HMIMainWindow(QMainWindow):
         self._draft_roi = []
         self._drawing_roi = False
         self._draw_roi_button.setText("Vẽ lại Vùng cấm (Click chuột)")
+        self._draw_roi_button.setObjectName("roiDrawButton")
+        self._draw_roi_button.style().unpolish(self._draw_roi_button)
+        self._draw_roi_button.style().polish(self._draw_roi_button)
+        self._canvas.set_roi_drawing_banner(False)
         self._refresh_canvas_overlay()
         self._roi_hint.setText(f"ROI: ĐÃ LƯU · {len(self._active_roi)} ĐỈNH")
 
@@ -2730,6 +3291,10 @@ class HMIMainWindow(QMainWindow):
         self._draft_roi = []
         self._drawing_roi = False
         self._draw_roi_button.setText("Vẽ lại Vùng cấm (Click chuột)")
+        self._draw_roi_button.setObjectName("roiDrawButton")
+        self._draw_roi_button.style().unpolish(self._draw_roi_button)
+        self._draw_roi_button.style().polish(self._draw_roi_button)
+        self._canvas.set_roi_drawing_banner(False)
         self._worker.set_roi_points(self._active_roi)
         self._refresh_canvas_overlay()
         self._roi_hint.setText("ROI: ĐÃ KHÔI PHỤC MẶC ĐỊNH")
@@ -2748,10 +3313,30 @@ class HMIMainWindow(QMainWindow):
         self._drawing_roi = False
         self._draft_roi = []
         self._draw_roi_button.setText("Vẽ lại Vùng cấm (Click chuột)")
+        self._draw_roi_button.setObjectName("roiDrawButton")
+        self._draw_roi_button.style().unpolish(self._draw_roi_button)
+        self._draw_roi_button.style().polish(self._draw_roi_button)
+        self._canvas.set_roi_drawing_banner(False)
         self._editing_occlusion = True
         self._draft_occlusion_points = []
+        self._set_mask_drawing_button(True)
         self._refresh_canvas_overlay()
         self._roi_hint.setText("MASK MÁY: CHẤM TỐI THIỂU 3 ĐỈNH")
+
+    def _set_mask_drawing_button(self, active: bool) -> None:
+        """Đồng bộ nhãn và màu nút theo trạng thái vẽ đa giác mask."""
+        self._draw_occlusion_button.setText(
+            "Đang vẽ mask..." if active else "Vẽ che máy"
+        )
+        self._draw_occlusion_button.setObjectName(
+            "maskDrawActiveButton" if active else "maskButton"
+        )
+        self._draw_occlusion_button.style().unpolish(
+            self._draw_occlusion_button
+        )
+        self._draw_occlusion_button.style().polish(
+            self._draw_occlusion_button
+        )
 
     def _add_occlusion_point(self, x: int, y: int) -> None:
         """Thêm một đỉnh che khuất đã quy đổi sang hệ tọa độ 640×360.
@@ -2828,6 +3413,7 @@ class HMIMainWindow(QMainWindow):
         )
         self._draft_occlusion_points = []
         self._editing_occlusion = False
+        self._set_mask_drawing_button(False)
         self._worker.set_occlusion_polygons(self._occlusion_polygons)
         self._refresh_canvas_overlay()
         self._roi_hint.setText(
@@ -2859,6 +3445,7 @@ class HMIMainWindow(QMainWindow):
         self._occlusion_polygons = []
         self._draft_occlusion_points = []
         self._editing_occlusion = False
+        self._set_mask_drawing_button(False)
         self._worker.set_occlusion_polygons([])
         self._refresh_canvas_overlay()
         self._roi_hint.setText("MASK MÁY: ĐÃ XÓA")
@@ -2926,15 +3513,15 @@ class HMIMainWindow(QMainWindow):
             return
 
         self._filtered_events = filtered
-        self._audit_table_fingerprint = tuple(
+        self._audit_rows_fingerprint = tuple(
             (event.event_id, event.violation_duration)
             for event in filtered
         )
-        self._render_audit_table(filtered)
+        self._render_audit_rows(filtered)
         self._refresh_carousel(filtered)
 
-    def _render_audit_table(self, events: list[AuditEvent]) -> None:
-        """Cập nhật bảng nhật ký bằng danh sách đã lọc hiện hành.
+    def _render_audit_rows(self, events: list[AuditEvent]) -> None:
+        """Cập nhật các dòng nhật ký bằng danh sách đã lọc hiện hành.
 
         Args:
             events: Danh sách AuditEvent cần hiển thị.
@@ -2942,18 +3529,17 @@ class HMIMainWindow(QMainWindow):
         Returns:
             None.
         """
-        self._audit_table.setRowCount(len(events))
-        for row, event in enumerate(reversed(events)):
-            values = (
-                event.event_id,
-                event.occurred_at.strftime("%H:%M:%S"),
-                f"{event.violation_duration:.1f}s",
-                f"({event.foot_point[0]}, {event.foot_point[1]})",
-            )
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setData(Qt.ItemDataRole.UserRole, event.event_id)
-                self._audit_table.setItem(row, column, item)
+        while self._audit_rows_layout.count():
+            item = self._audit_rows_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        for event in reversed(events):
+            row = AuditEventRowWidget(event)
+            row.activated.connect(self._open_snapshot)
+            self._audit_rows_layout.addWidget(row)
+        self._audit_rows_layout.addStretch(1)
         self._audit_count.setText(f"{len(events)} sự kiện")
 
     def _refresh_carousel(self, events: list[AuditEvent]) -> None:
@@ -2987,7 +3573,10 @@ class HMIMainWindow(QMainWindow):
         for event in reversed(visible_events):
             card = SnapshotCardWidget(event)
             card.activated.connect(self._open_snapshot)
-            self._carousel_layout.addWidget(card)
+            thumbnail = card.findChild(QLabel, "snapshotThumbnail")
+            if thumbnail is not None:
+                self._install_hover_effect(card, thumbnail)
+            self._carousel_layout.addWidget(AnimatedSnapshotCard(card))
 
         self._carousel_layout.addStretch(1)
         self._carousel_widget.adjustSize()
@@ -3004,7 +3593,7 @@ class HMIMainWindow(QMainWindow):
         """
         try:
             dialog = SnapshotPreviewDialog(event, self)
-            dialog.exec()
+            self._exec_with_backdrop_blur(dialog)
         except (OSError, cv2.error) as error:
             LOGGER.exception("Không thể mở ảnh bằng chứng %s.", event.event_id)
             QMessageBox.warning(
@@ -3012,32 +3601,6 @@ class HMIMainWindow(QMainWindow):
                 "Không thể mở ảnh",
                 f"Ảnh bằng chứng không đọc được:\n{error}",
             )
-
-    def _on_table_double_clicked(self, row: int, column: int) -> None:
-        """Mở ảnh bằng chứng tương ứng khi double-click dòng nhật ký.
-
-        Args:
-            row: Hàng đang được kích hoạt.
-            column: Cột nhận double-click.
-
-        Returns:
-            None.
-        """
-        del column
-        item = self._audit_table.item(row, 0)
-        if item is None:
-            return
-        event_id = item.data(Qt.ItemDataRole.UserRole)
-        event = next(
-            (
-                candidate
-                for candidate in self._filtered_events
-                if candidate.event_id == event_id
-            ),
-            None,
-        )
-        if event is not None:
-            self._open_snapshot(event)
 
     def _export_csv(self) -> None:
         """Mở hộp thoại lưu CSV và xuất danh sách đang hiển thị.
@@ -3105,7 +3668,7 @@ class HMIMainWindow(QMainWindow):
             if packet.frame is not None and packet.analysis is not None:
                 self._canvas.set_frame(packet.frame)
                 self._people_value.setText(
-                    f"{len(packet.analysis.detections):02d}"
+                    f"{len(packet.analysis.detections):02d} người"
                 )
                 source_name = self._source_display_name()
                 point_score = (
@@ -3199,10 +3762,16 @@ class HMIMainWindow(QMainWindow):
         self._safety_badge.setObjectName(object_name)
         self._safety_badge.style().unpolish(self._safety_badge)
         self._safety_badge.style().polish(self._safety_badge)
-        self._people_value.setText(f"{detection_count:02d}")
+        self._people_value.setText(f"{detection_count:02d} người")
+        machine_stopped = safety.estop_triggered
         self._machine_state_value.setText(
-            "DỪNG KHẨN CẤP" if safety.estop_triggered else "ĐANG CHẠY"
+            "DỪNG KHẨN CẤP" if machine_stopped else "ĐANG CHẠY"
         )
+        self._machine_state_value.setObjectName(
+            "metricValueAlarm" if machine_stopped else "metricValueSafe"
+        )
+        self._machine_state_value.style().unpolish(self._machine_state_value)
+        self._machine_state_value.style().polish(self._machine_state_value)
         delay = self._delay_slider.value() / 10.0
         duration = safety.violation_duration
         self._intrusion_buffer_label.setText(
@@ -3216,7 +3785,30 @@ class HMIMainWindow(QMainWindow):
             if delay > 0
             else 0
         )
-        self._intrusion_progress.setValue(progress)
+        if self._intrusion_progress.property("alarm") != (
+            safety.state is SafetyState.ALARM
+        ):
+            self._intrusion_progress.setProperty(
+                "alarm",
+                safety.state is SafetyState.ALARM,
+            )
+            self._intrusion_progress.style().unpolish(
+                self._intrusion_progress
+            )
+            self._intrusion_progress.style().polish(
+                self._intrusion_progress
+            )
+        animation = self._intrusion_progress_animation
+        if (
+            animation.state() == QAbstractAnimation.State.Running
+            and animation.endValue() == progress
+        ):
+            pass
+        else:
+            animation.stop()
+            animation.setStartValue(self._intrusion_progress.value())
+            animation.setEndValue(progress)
+            animation.start()
         self._ack_button.setEnabled(safety.latched)
         self._estop_status.setText(
             "E-STOP: ĐÃ KÍCH HOẠT"
@@ -3256,13 +3848,13 @@ class HMIMainWindow(QMainWindow):
             return
 
         self._filtered_events = filtered
-        table_fingerprint = tuple(
+        rows_fingerprint = tuple(
             (event.event_id, event.violation_duration)
             for event in filtered
         )
-        if table_fingerprint != self._audit_table_fingerprint:
-            self._audit_table_fingerprint = table_fingerprint
-            self._render_audit_table(filtered)
+        if rows_fingerprint != self._audit_rows_fingerprint:
+            self._audit_rows_fingerprint = rows_fingerprint
+            self._render_audit_rows(filtered)
         self._refresh_carousel(filtered)
         current_hour = datetime.now().hour
         current_shift = (
@@ -3274,7 +3866,7 @@ class HMIMainWindow(QMainWindow):
             current_shift,
             current_events,
         )
-        self._shift_alarms_value.setText(f"{len(shift_events):02d}")
+        self._shift_alarms_value.setText(f"{len(shift_events):02d} ca")
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Dừng worker CV, camera, còi và ghi ảnh trước khi đóng cửa sổ.

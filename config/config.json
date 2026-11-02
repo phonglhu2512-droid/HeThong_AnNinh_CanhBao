@@ -1,7 +1,7 @@
 {
   "video_source": {
     "mode": "webcam",
-    "device_id": 1,
+    "device_id": 2,
     "file_path": "C:/0_Data/02_PROJECTS/TGMT/1102.mp4",
     "rtsp_url": "",
     "port": 554,
@@ -11,27 +11,27 @@
   },
   "roi_points": [
     [
-      160,
-      120
+      366,
+      244
     ],
     [
-      480,
-      120
+      576,
+      241
     ],
     [
-      480,
-      320
+      550,
+      334
     ],
     [
-      160,
-      320
+      354,
+      327
     ]
   ],
   "occlusion_polygons": [],
   "display_overlays": {
-    "bounding_box": false,
+    "bounding_box": true,
     "foot_point": true
   },
-  "min_area": 1510,
+  "min_area": 1500,
   "violation_delay": 0.8
 }
