@@ -98,6 +98,7 @@ class AuditLogger:
         self._lock: threading.RLock = threading.RLock()
         self._events: list[AuditEvent] = []
         self._write_errors: dict[str, str] = {}
+        self._written_event_ids: set[str] = set()
         self._reserved_image_paths: set[Path] = set()
         self._next_event_number: int = 1
         self._closed: bool = False
@@ -126,6 +127,11 @@ class AuditLogger:
         """
         with self._lock:
             return dict(self._write_errors)
+
+    def is_evidence_saved(self, event_id: str) -> bool:
+        """Cho biết ảnh của sự kiện đã được worker ghi thành công hay chưa."""
+        with self._lock:
+            return event_id in self._written_event_ids
 
     @property
     def is_running(self) -> bool:
@@ -500,6 +506,7 @@ class AuditLogger:
         else:
             with self._lock:
                 self._write_errors.pop(job.event.event_id, None)
+                self._written_event_ids.add(job.event.event_id)
 
     @staticmethod
     def _annotate_frame(

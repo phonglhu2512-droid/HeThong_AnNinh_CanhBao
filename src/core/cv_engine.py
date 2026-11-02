@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from importlib import import_module
 from typing import Any
@@ -32,6 +32,7 @@ class Detection:
     bounding_box: tuple[int, int, int, int]
     foot_point: tuple[int, int]
     area: float
+    intersects_roi: bool = False
 
 
 @dataclass(frozen=True)
@@ -340,6 +341,10 @@ class CVProcessor:
                     or person_in_roi
                 )
 
+            detections = self._mark_roi_intersections(
+                detections,
+                roi_points,
+            )
             canny_frame = cv2.Canny(
                 blurred_frame,
                 self.CANNY_THRESHOLDS[0],
@@ -413,7 +418,7 @@ class CVProcessor:
         detections: tuple[Detection, ...],
         roi_points: list[tuple[int, int]] | None,
     ) -> bool:
-        """Kiểm tra có điểm chân phát hiện nào nằm trong ROI để giữ nền.
+        """Kiểm tra foot hoặc bbox của detection có chạm ROI để giữ nền.
 
         Args:
             detections: Các đối tượng vừa trích xuất từ mask MOG2.
@@ -426,13 +431,129 @@ class CVProcessor:
             return False
         polygon = np.asarray(roi_points, dtype=np.int32).reshape((-1, 1, 2))
         return any(
+            detection.intersects_roi
+            or CVProcessor._detection_intersects_roi(detection, roi_points, polygon)
+            for detection in detections
+        )
+
+    @classmethod
+    def _mark_roi_intersections(
+        cls,
+        detections: tuple[Detection, ...],
+        roi_points: list[tuple[int, int]] | None,
+    ) -> tuple[Detection, ...]:
+        """Đánh dấu detection có foot hoặc bất kỳ cạnh bbox nào chạm ROI."""
+        if not roi_points or len(roi_points) < 3:
+            return detections
+        polygon = np.asarray(roi_points, dtype=np.int32).reshape((-1, 1, 2))
+        return tuple(
+            replace(
+                detection,
+                intersects_roi=cls._detection_intersects_roi(
+                    detection,
+                    roi_points,
+                    polygon,
+                ),
+            )
+            for detection in detections
+        )
+
+    @staticmethod
+    def _detection_intersects_roi(
+        detection: Detection,
+        roi_points: list[tuple[int, int]],
+        polygon: np.ndarray | None = None,
+    ) -> bool:
+        """Kiểm tra giao nhau đầy đủ giữa hình chữ nhật bbox và đa giác ROI."""
+        if len(roi_points) < 3:
+            return False
+        roi_polygon = (
+            np.asarray(roi_points, dtype=np.int32).reshape((-1, 1, 2))
+            if polygon is None
+            else polygon
+        )
+        x, y, width, height = detection.bounding_box
+        right = x + width
+        bottom = y + height
+        box_corners = (
+            (x, y),
+            (right, y),
+            (right, bottom),
+            (x, bottom),
+        )
+        points_to_test = (detection.foot_point, *box_corners)
+        if any(
             cv2.pointPolygonTest(
-                polygon,
-                (float(detection.foot_point[0]), float(detection.foot_point[1])),
+                roi_polygon,
+                (float(point[0]), float(point[1])),
                 False,
             )
             >= 0
-            for detection in detections
+            for point in points_to_test
+        ):
+            return True
+
+        if any(
+            x <= point[0] <= right and y <= point[1] <= bottom
+            for point in roi_points
+        ):
+            return True
+
+        box_edges = tuple(
+            (box_corners[index], box_corners[(index + 1) % 4])
+            for index in range(4)
+        )
+        roi_edges = tuple(
+            (roi_points[index], roi_points[(index + 1) % len(roi_points)])
+            for index in range(len(roi_points))
+        )
+        return any(
+            CVProcessor._segments_intersect(box_edge, roi_edge)
+            for box_edge in box_edges
+            for roi_edge in roi_edges
+        )
+
+    @staticmethod
+    def _segments_intersect(
+        first: tuple[tuple[int, int], tuple[int, int]],
+        second: tuple[tuple[int, int], tuple[int, int]],
+    ) -> bool:
+        """Kiểm tra hai đoạn thẳng đóng có cắt hoặc chạm nhau."""
+        a, b = first
+        c, d = second
+
+        def orientation(
+            p1: tuple[int, int],
+            p2: tuple[int, int],
+            p3: tuple[int, int],
+        ) -> int:
+            value = (
+                (p2[0] - p1[0]) * (p3[1] - p1[1])
+                - (p2[1] - p1[1]) * (p3[0] - p1[0])
+            )
+            return (value > 0) - (value < 0)
+
+        def on_segment(
+            p1: tuple[int, int],
+            p2: tuple[int, int],
+            point: tuple[int, int],
+        ) -> bool:
+            return (
+                min(p1[0], p2[0]) <= point[0] <= max(p1[0], p2[0])
+                and min(p1[1], p2[1]) <= point[1] <= max(p1[1], p2[1])
+            )
+
+        o1 = orientation(a, b, c)
+        o2 = orientation(a, b, d)
+        o3 = orientation(c, d, a)
+        o4 = orientation(c, d, b)
+        if o1 != o2 and o3 != o4:
+            return True
+        return (
+            (o1 == 0 and on_segment(a, b, c))
+            or (o2 == 0 and on_segment(a, b, d))
+            or (o3 == 0 and on_segment(c, d, a))
+            or (o4 == 0 and on_segment(c, d, b))
         )
 
     @classmethod

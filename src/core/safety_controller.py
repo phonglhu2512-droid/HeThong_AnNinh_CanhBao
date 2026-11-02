@@ -242,14 +242,17 @@ class SafetyController:
         *,
         timestamp: float | None = None,
         skip_evaluation: bool = False,
+        intrusion_detected: bool | None = None,
     ) -> SafetyResult:
-        """Đánh giá điểm chân với ROI và cập nhật trạng thái thời gian thực.
+        """Đánh giá điểm chân hoặc bbox giao ROI và cập nhật trạng thái.
 
         Args:
             foot_point: Tọa độ chân cần kiểm tra; None biểu thị không có đối tượng.
             roi_points: Tối thiểu ba đỉnh đa giác ROI theo hệ tọa độ frame.
             timestamp: Mốc đơn điệu tính bằng giây; None dùng time.monotonic().
             skip_evaluation: Bỏ đánh giá frame sốc sáng, giữ trạng thái hiện hành.
+            intrusion_detected: Bằng chứng bbox cắt ROI từ pipeline CV; True
+                xác nhận xâm nhập ngay cả khi điểm chân còn ngoài đa giác.
 
         Returns:
             SafetyResult gồm trạng thái, thời lượng, latch và cờ E-STOP hiện tại.
@@ -261,6 +264,11 @@ class SafetyController:
         """
         validated_point = self._validate_foot_point(foot_point)
         polygon = self._build_roi_polygon(roi_points)
+        if intrusion_detected is not None and not isinstance(
+            intrusion_detected,
+            bool,
+        ):
+            raise TypeError("intrusion_detected phải là bool hoặc None.")
         current_time = time.monotonic() if timestamp is None else timestamp
         if (
             isinstance(current_time, bool)
@@ -279,7 +287,10 @@ class SafetyController:
                     evaluation_skipped=True,
                 )
 
-            inside_roi = self._is_point_inside(validated_point, polygon)
+            inside_roi = (
+                self._is_point_inside(validated_point, polygon)
+                or intrusion_detected is True
+            )
             self._last_foot_point = validated_point
             self._inside_roi = inside_roi
 

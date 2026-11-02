@@ -1,7 +1,7 @@
 {
   "video_source": {
     "mode": "webcam",
-    "device_id": 2,
+    "device_id": 1,
     "file_path": "C:/0_Data/02_PROJECTS/TGMT/1102.mp4",
     "rtsp_url": "",
     "port": 554,

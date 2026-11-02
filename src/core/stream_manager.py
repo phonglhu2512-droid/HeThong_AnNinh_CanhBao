@@ -472,6 +472,8 @@ class StreamManager:
                         self._stop_event.wait(self.reconnect_interval)
                         continue
 
+                    if isinstance(source, int) and not isinstance(source, bool):
+                        frame = cv2.flip(frame, 1)
                     resized_frame = cv2.resize(frame, self.target_size)
                     self._enqueue_latest_frame(resized_frame)
 

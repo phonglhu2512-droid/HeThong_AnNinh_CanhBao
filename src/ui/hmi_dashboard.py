@@ -26,6 +26,7 @@ from PyQt6.QtCore import (
     QTimer,
     QPropertyAnimation,
     pyqtSignal,
+    pyqtSlot,
 )
 from PyQt6.QtGui import (
     QCloseEvent,
@@ -51,6 +52,7 @@ from PyQt6.QtWidgets import (
     QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
+    QLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -671,7 +673,7 @@ class _CVSafetyWorker(threading.Thread):
                     display_mode=display_mode,
                     roi_points=roi_points,
                 )
-                foot_point, _ = self._select_detection(
+                foot_point, _, intrusion_detected = self._select_detection(
                     analysis,
                     roi_points,
                 )
@@ -687,6 +689,7 @@ class _CVSafetyWorker(threading.Thread):
                     roi_points,
                     timestamp=frame_time,
                     skip_evaluation=analysis.skip_safety_evaluation,
+                    intrusion_detected=intrusion_detected,
                 )
                 rendered_frame = self._render_frame(
                     analysis,
@@ -747,25 +750,30 @@ class _CVSafetyWorker(threading.Thread):
     def _select_detection(
         analysis: FrameAnalysis,
         roi_points: list[ROIPoint],
-    ) -> tuple[ROIPoint | None, tuple[int, int, int, int] | None]:
-        """Chọn điểm chân trong ROI nếu có, nếu không dùng contour đầu tiên.
+    ) -> tuple[
+        ROIPoint | None,
+        tuple[int, int, int, int] | None,
+        bool,
+    ]:
+        """Ưu tiên detection có foot/bbox chạm ROI, rồi dùng detection đầu.
 
         Args:
             analysis: Kết quả CV frame hiện tại.
             roi_points: Đa giác ROI được dùng để ưu tiên đối tượng xâm nhập.
 
         Returns:
-            Điểm chân và hộp bao tương ứng; cả hai None nếu không có contour.
+            Điểm chân, bbox, và cờ giao ROI; tọa độ None nếu không có detection.
 
         Raises:
             cv2.error: Khi pointPolygonTest thất bại.
         """
         if not analysis.detections:
-            return None, None
+            return None, None, False
         polygon = np.asarray(roi_points, dtype=np.int32).reshape((-1, 1, 2))
         for detection in analysis.detections:
             if (
-                cv2.pointPolygonTest(
+                detection.intersects_roi
+                or cv2.pointPolygonTest(
                     polygon,
                     (
                         float(detection.foot_point[0]),
@@ -775,9 +783,13 @@ class _CVSafetyWorker(threading.Thread):
                 )
                 >= 0
             ):
-                return detection.foot_point, detection.bounding_box
+                return (
+                    detection.foot_point,
+                    detection.bounding_box,
+                    True,
+                )
         detection = analysis.detections[0]
-        return detection.foot_point, detection.bounding_box
+        return detection.foot_point, detection.bounding_box, False
 
     @staticmethod
     def _render_frame(
@@ -1042,10 +1054,13 @@ class SnapshotCardWidget(QFrame):
         self,
         event: AuditEvent,
         parent: QWidget | None = None,
+        *,
+        duration_available: bool = True,
     ) -> None:
         """Tạo thẻ ảnh kiểm toán với thời gian, thời lượng và liên kết xem."""
         super().__init__(parent)
         self._event = event
+        self._image_ready = event.image_path.is_file()
         self.setObjectName("snapshotCard")
         self.setFixedSize(155, 125)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1069,9 +1084,11 @@ class SnapshotCardWidget(QFrame):
         image.setObjectName("snapshotThumbnail")
         image.setAlignment(Qt.AlignmentFlag.AlignCenter)
         image.setFixedSize(141, 76)
-        pixmap = QPixmap(str(event.image_path))
+        pixmap = QPixmap(str(event.image_path)) if self._image_ready else QPixmap()
         if pixmap.isNull():
-            image.setText("Không đọc được ảnh")
+            image.setText(
+                "Không đọc được ảnh" if self._image_ready else "Đang lưu ảnh..."
+            )
         else:
             scaled = pixmap.scaled(
                 image.size(),
@@ -1110,7 +1127,12 @@ class SnapshotCardWidget(QFrame):
         layout.addWidget(image_container)
 
         footer = QHBoxLayout()
-        duration = QLabel(f"Vi phạm: {event.violation_duration:.1f}s")
+        duration_text = (
+            f"Vi phạm: {event.violation_duration:.1f}s"
+            if duration_available
+            else "Vi phạm: Chưa có dữ liệu"
+        )
+        duration = QLabel(duration_text)
         duration.setObjectName("snapshotDuration")
         view_label = QLabel("Xem →")
         view_label.setObjectName("snapshotLink")
@@ -1120,6 +1142,18 @@ class SnapshotCardWidget(QFrame):
         footer.addStretch(1)
         footer.addWidget(view_label)
         layout.addLayout(footer)
+
+    @property
+    def audit_event(self) -> AuditEvent:
+        """Trả về dữ liệu kiểm toán hiện hiển thị trên thẻ."""
+        return self._event
+
+    def update_event(self, event: AuditEvent) -> None:
+        """Cập nhật metadata thời lượng mà không dựng lại thumbnail."""
+        self._event = event
+        duration = self.findChild(QLabel, "snapshotDuration")
+        if duration is not None:
+            duration.setText(f"Vi phạm: {event.violation_duration:.1f}s")
 
     def mousePressEvent(self, event: object) -> None:
         """Chấp nhận thao tác nhấn trái để nhận click trên toàn bộ thẻ."""
@@ -1133,6 +1167,7 @@ class SnapshotCardWidget(QFrame):
         if (
             event.button() == Qt.MouseButton.LeftButton
             and self.rect().contains(event.position().toPoint())
+            and self._image_ready
         ):
             self.activated.emit(self._event)
             event.accept()
@@ -1256,6 +1291,7 @@ class HMIMainWindow(QMainWindow):
 
     webcams_scanned = pyqtSignal(list, str)
     camera_test_completed = pyqtSignal(bool, str)
+    new_evidence_signal = pyqtSignal(dict)
 
     def __init__(
         self,
@@ -1303,7 +1339,9 @@ class HMIMainWindow(QMainWindow):
         self._pending_auto_source_switch = False
         self._setup_mode = False
         self._filtered_events: list[AuditEvent] = audit_logger.get_events()
-        self._carousel_fingerprint: tuple[tuple[str, bool, float], ...] = ()
+        self._carousel_loaded = False
+        self._carousel_seen_event_ids: set[str] = set()
+        self._carousel_filter: tuple[int | str, str | None, str | None] | None = None
         self._audit_rows_fingerprint: tuple[tuple[str, float], ...] = ()
         self._last_canvas_state: tuple[SafetyState, StreamState, bool] | None = None
         self._shutdown_complete = False
@@ -1313,11 +1351,13 @@ class HMIMainWindow(QMainWindow):
         self.setMinimumSize(1120, 760)
         self.webcams_scanned.connect(self._on_webcams_scanned)
         self.camera_test_completed.connect(self._on_camera_test_completed)
+        self.new_evidence_signal.connect(self.on_new_evidence_received)
         self._build_ui()
         self._apply_styles()
         self._apply_card_shadows()
         self._setup_progress_animation()
         self._install_button_hover_effects()
+        self._load_initial_carousel()
         self._load_source_form()
 
         self._worker = _CVSafetyWorker(
@@ -1341,6 +1381,7 @@ class HMIMainWindow(QMainWindow):
         self._audit_timer.setInterval(120)
         self._audit_timer.timeout.connect(self._refresh_audit_views)
         self._audit_timer.start()
+        self._refresh_audit_views()
 
     @property
     def shutdown_complete(self) -> bool:
@@ -1927,7 +1968,7 @@ class HMIMainWindow(QMainWindow):
         carousel_layout.addLayout(title_row)
 
         self._carousel_scroll = QScrollArea()
-        self._carousel_scroll.setWidgetResizable(False)
+        self._carousel_scroll.setWidgetResizable(True)
         self._carousel_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
@@ -1938,6 +1979,10 @@ class HMIMainWindow(QMainWindow):
         self._carousel_layout = QHBoxLayout(self._carousel_widget)
         self._carousel_layout.setContentsMargins(4, 4, 4, 4)
         self._carousel_layout.setSpacing(10)
+        self._carousel_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self._carousel_layout.setSizeConstraint(
+            QLayout.SizeConstraint.SetMinimumSize
+        )
         self._carousel_scroll.setWidget(self._carousel_widget)
         carousel_layout.addWidget(self._carousel_scroll, 1)
         splitter.addWidget(carousel_panel)
@@ -3497,13 +3542,17 @@ class HMIMainWindow(QMainWindow):
         """
         all_events = self._audit_logger.get_events()
         shift = self._shift_combo.currentData()
+        start_time: str | None = None
+        end_time: str | None = None
         try:
             if shift is None:
                 filtered = all_events
             elif shift == "custom":
+                start_time = self._start_time_edit.time().toString("HH:mm")
+                end_time = self._end_time_edit.time().toString("HH:mm")
                 filtered = self._audit_logger.filter_by_time_range(
-                    self._start_time_edit.time().toString("HH:mm"),
-                    self._end_time_edit.time().toString("HH:mm"),
+                    start_time,
+                    end_time,
                     all_events,
                 )
             else:
@@ -3512,6 +3561,7 @@ class HMIMainWindow(QMainWindow):
             QMessageBox.warning(self, "Bộ lọc thời gian", str(error))
             return
 
+        self._carousel_filter = (shift, start_time, end_time)
         self._filtered_events = filtered
         self._audit_rows_fingerprint = tuple(
             (event.event_id, event.violation_duration)
@@ -3543,44 +3593,249 @@ class HMIMainWindow(QMainWindow):
         self._audit_count.setText(f"{len(events)} sự kiện")
 
     def _refresh_carousel(self, events: list[AuditEvent]) -> None:
-        """Đồng bộ thumbnail và nhãn thời gian/thời lượng với bộ lọc đang dùng.
+        """Hiển thị kết quả lọc do người dùng chủ động áp dụng.
 
         Args:
-            events: Danh sách sự kiện đã lọc.
+            events: Sự kiện đã lọc theo thao tác nút [Lọc].
 
         Returns:
             None.
         """
-        visible_events = [event for event in events if event.image_path.is_file()]
-        fingerprint = tuple(
-            (
-                event.event_id,
-                event.image_path.is_file(),
-                event.violation_duration,
-            )
+        carousel_items: dict[Path, tuple[AuditEvent, bool]] = {
+            event.image_path: (event, True)
             for event in events
-        )
-        if fingerprint == self._carousel_fingerprint:
-            return
-        self._carousel_fingerprint = fingerprint
+            if self._audit_logger.is_evidence_saved(event.event_id)
+        }
+        for archived_event in self._scan_recent_snapshot_events():
+            if not self._snapshot_matches_current_filter(archived_event):
+                continue
+            carousel_items.setdefault(
+                archived_event.image_path,
+                (archived_event, False),
+            )
+        visible_items = sorted(
+            carousel_items.values(),
+            key=lambda item: item[0].occurred_at,
+            reverse=True,
+        )[:10]
+        self._replace_carousel_cards(visible_items)
 
+    def _load_initial_carousel(self) -> None:
+        """Nạp tối đa 10 ảnh mới nhất đúng một lần khi dựng giao diện."""
+        if self._carousel_loaded:
+            return
+        events = self._audit_logger.get_events()
+        event_items = {
+            event.image_path: (event, True)
+            for event in events
+            if self._audit_logger.is_evidence_saved(event.event_id)
+        }
+        self._carousel_seen_event_ids.update(
+            event.event_id
+            for event in events
+            if self._audit_logger.is_evidence_saved(event.event_id)
+        )
+        for archived_event in self._scan_recent_snapshot_events():
+            event_items.setdefault(
+                archived_event.image_path,
+                (archived_event, False),
+            )
+        visible_items = sorted(
+            event_items.values(),
+            key=lambda item: item[0].occurred_at,
+            reverse=True,
+        )[:10]
+        self._replace_carousel_cards(visible_items)
+        self._carousel_loaded = True
+
+    def _replace_carousel_cards(
+        self,
+        items: list[tuple[AuditEvent, bool]],
+    ) -> None:
+        """Thay danh sách thẻ khi khởi tạo hoặc người dùng chủ động lọc."""
         while self._carousel_layout.count():
             item = self._carousel_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
 
-        for event in reversed(visible_events):
-            card = SnapshotCardWidget(event)
-            card.activated.connect(self._open_snapshot)
-            thumbnail = card.findChild(QLabel, "snapshotThumbnail")
-            if thumbnail is not None:
-                self._install_hover_effect(card, thumbnail)
-            self._carousel_layout.addWidget(AnimatedSnapshotCard(card))
-
-        self._carousel_layout.addStretch(1)
+        for event, duration_available in items:
+            self._carousel_layout.addWidget(
+                self._create_snapshot_card(event, duration_available)
+            )
         self._carousel_widget.adjustSize()
-        self._snapshot_count.setText(f"{len(visible_events)} ảnh")
+        self._snapshot_count.setText(f"{len(items)} ảnh")
+
+    def _create_snapshot_card(
+        self,
+        event: AuditEvent,
+        duration_available: bool,
+    ) -> AnimatedSnapshotCard:
+        """Tạo thẻ Snapshot cùng hiệu ứng và tương tác đã dùng trong carousel."""
+        card = SnapshotCardWidget(
+            event,
+            duration_available=duration_available,
+        )
+        card.activated.connect(self._open_snapshot)
+        thumbnail = card.findChild(QLabel, "snapshotThumbnail")
+        if thumbnail is not None:
+            self._install_hover_effect(card, thumbnail)
+        return AnimatedSnapshotCard(card)
+
+    def _emit_new_saved_evidence(self, events: list[AuditEvent]) -> None:
+        """Phát tín hiệu cho ảnh mới sau khi AuditLogger xác nhận ghi thành công."""
+        write_errors = self._audit_logger.write_errors
+        for event in events:
+            if event.event_id in self._carousel_seen_event_ids:
+                continue
+            if event.event_id in write_errors:
+                self._carousel_seen_event_ids.add(event.event_id)
+                continue
+            if not self._audit_logger.is_evidence_saved(event.event_id):
+                continue
+            self._carousel_seen_event_ids.add(event.event_id)
+            self.new_evidence_signal.emit(
+                {
+                    "event": event,
+                    "duration_available": True,
+                }
+            )
+
+    @pyqtSlot(dict)
+    def on_new_evidence_received(self, event_data: dict) -> None:
+        """Chèn ảnh mới vào đầu carousel trên GUI thread qua Qt signal."""
+        event = event_data.get("event")
+        duration_available = event_data.get("duration_available")
+        if not isinstance(event, AuditEvent) or not isinstance(
+            duration_available,
+            bool,
+        ):
+            LOGGER.error("Bỏ qua dữ liệu Snapshot mới không hợp lệ.")
+            return
+        if self._carousel_filter is not None and not (
+            self._snapshot_matches_current_filter(event)
+        ):
+            return
+
+        new_card = self._create_snapshot_card(event, duration_available)
+        self._carousel_layout.insertWidget(0, new_card)
+        new_card.show()
+        card = new_card.findChild(SnapshotCardWidget)
+        if card is not None:
+            card.show()
+        while self._carousel_layout.count() > 10:
+            item = self._carousel_layout.takeAt(
+                self._carousel_layout.count() - 1
+            )
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._carousel_widget.adjustSize()
+        self._snapshot_count.setText(
+            f"{self._carousel_layout.count()} ảnh"
+        )
+
+    def _update_snapshot_card_events(
+        self,
+        events: list[AuditEvent],
+    ) -> None:
+        """Đồng bộ thời lượng sự kiện đã chốt mà không xóa thẻ hiện có."""
+        events_by_id = {event.event_id: event for event in events}
+        for index in range(self._carousel_layout.count()):
+            widget = self._carousel_layout.itemAt(index).widget()
+            if widget is None:
+                continue
+            card = widget.findChild(SnapshotCardWidget)
+            if card is None:
+                continue
+            event = events_by_id.get(card.audit_event.event_id)
+            if event is not None:
+                card.update_event(event)
+
+    def _snapshot_matches_current_filter(self, event: AuditEvent) -> bool:
+        """Giữ Snapshot lưu trữ đồng bộ với bộ lọc thời gian hiện hành."""
+        if self._carousel_filter is None:
+            return True
+        shift, start_time, end_time = self._carousel_filter
+        try:
+            if shift is None:
+                return True
+            if shift == "custom":
+                if start_time is None or end_time is None:
+                    LOGGER.error("Bộ lọc thời gian tùy chỉnh thiếu giờ bắt đầu/kết thúc.")
+                    return False
+                filtered = self._audit_logger.filter_by_time_range(
+                    start_time,
+                    end_time,
+                    [event],
+                )
+            else:
+                filtered = self._audit_logger.filter_by_shift(shift, [event])
+        except (TypeError, ValueError):
+            LOGGER.exception(
+                "Không thể áp dụng bộ lọc lên Snapshot cũ %s.",
+                event.event_id,
+            )
+            return False
+        return bool(filtered)
+
+    def _scan_recent_snapshot_events(self) -> list[AuditEvent]:
+        """Đọc file JPG bằng chứng thành event hiển thị không có metadata."""
+        active_events = {
+            event.image_path: event
+            for event in self._audit_logger.get_events()
+        }
+        try:
+            image_paths = sorted(
+                (
+                    path
+                    for path in self._audit_logger.evidence_dir.iterdir()
+                    if path.is_file() and path.suffix.lower() == ".jpg"
+                ),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            LOGGER.exception(
+                "Không thể quét thư mục bằng chứng %s.",
+                self._audit_logger.evidence_dir,
+            )
+            return []
+
+        archived_events: list[AuditEvent] = []
+        for image_path in image_paths:
+            active_event = active_events.get(image_path)
+            if active_event is not None:
+                if not self._audit_logger.is_evidence_saved(
+                    active_event.event_id
+                ):
+                    continue
+                archived_events.append(active_event)
+                continue
+            try:
+                timestamp = datetime.strptime(
+                    image_path.stem[4:19],
+                    "%Y%m%d_%H%M%S",
+                )
+            except ValueError:
+                try:
+                    timestamp = datetime.fromtimestamp(image_path.stat().st_mtime)
+                except OSError:
+                    LOGGER.exception(
+                        "Không thể đọc thời điểm ảnh bằng chứng %s.",
+                        image_path,
+                    )
+                    continue
+            archived_events.append(
+                AuditEvent(
+                    event_id=image_path.stem,
+                    occurred_at=timestamp,
+                    violation_duration=0.0,
+                    foot_point=(0, 0),
+                    image_path=image_path,
+                )
+            )
+        return archived_events
 
     def _open_snapshot(self, event: AuditEvent) -> None:
         """Mở modal hiển thị ảnh bằng chứng đã lưu trên đĩa.
@@ -3682,7 +3937,7 @@ class HMIMainWindow(QMainWindow):
                 )
                 self._canvas.set_hud_lines(
                     f"REC • {datetime.now():%H:%M:%S} | {source_name}",
-                    f"cv2.pointPolygonTest: {point_score:+.1f} "
+                    f"ROI contact test: {point_score:+.1f} "
                     f"({point_state})",
                 )
                 if packet.safety is not None:
@@ -3831,6 +4086,8 @@ class HMIMainWindow(QMainWindow):
             None.
         """
         current_events = self._audit_logger.get_events()
+        self._emit_new_saved_evidence(current_events)
+        self._update_snapshot_card_events(current_events)
         shift = self._shift_combo.currentData()
         try:
             if shift is None:
@@ -3855,7 +4112,6 @@ class HMIMainWindow(QMainWindow):
         if rows_fingerprint != self._audit_rows_fingerprint:
             self._audit_rows_fingerprint = rows_fingerprint
             self._render_audit_rows(filtered)
-        self._refresh_carousel(filtered)
         current_hour = datetime.now().hour
         current_shift = (
             1 if 6 <= current_hour < 14
