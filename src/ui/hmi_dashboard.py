@@ -26,16 +26,19 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -90,6 +93,7 @@ class VideoCanvas(QWidget):
         """
         super().__init__(parent)
         self._image: QImage | None = None
+        self._hud_lines: tuple[str, str] = ("", "")
         self._roi_points: list[ROIPoint] = []
         self._draft_roi_points: list[ROIPoint] = []
         self._editing_roi: bool = False
@@ -124,6 +128,11 @@ class VideoCanvas(QWidget):
             QImage.Format.Format_RGB888,
         )
         self._image = image.copy()
+        self.update()
+
+    def set_hud_lines(self, first_line: str, second_line: str) -> None:
+        """Cập nhật hai dòng HUD phủ trên góc video."""
+        self._hud_lines = (first_line, second_line)
         self.update()
 
     def set_roi_overlay(
@@ -212,6 +221,28 @@ class VideoCanvas(QWidget):
 
         image_rect = self._image_rect()
         painter.drawImage(image_rect, self._image)
+        if any(self._hud_lines):
+            hud_rect = QRectF(
+                image_rect.x() + 10,
+                image_rect.y() + 10,
+                min(410, image_rect.width() - 20),
+                58,
+            )
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(30, 41, 59, 220))
+            painter.drawRoundedRect(hud_rect, 10, 10)
+            painter.setPen(QColor("#FFFFFF"))
+            painter.drawText(
+                hud_rect.adjusted(12, 7, -8, -30),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                self._hud_lines[0],
+            )
+            painter.setPen(QColor("#D1D5DB"))
+            painter.drawText(
+                hud_rect.adjusted(12, 28, -8, -7),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                self._hud_lines[1],
+            )
         if not self._roi_points and not self._draft_roi_points:
             return
 
@@ -409,6 +440,9 @@ class _CVSafetyWorker(threading.Thread):
         self._active_event_duration: float = 0.0
         self._previous_latched: bool = False
         self._last_fps: float = 0.0
+        self._last_processing_ms: float = 0.0
+        self._show_bounding_boxes: bool = True
+        self._show_foot_points: bool = True
 
     @property
     def fps(self) -> float:
@@ -421,6 +455,11 @@ class _CVSafetyWorker(threading.Thread):
             Số frame xử lý trung bình gần nhất mỗi giây.
         """
         return self._last_fps
+
+    @property
+    def processing_ms(self) -> float:
+        """Trả thời gian xử lý frame gần nhất tính bằng mili giây."""
+        return self._last_processing_ms
 
     def set_roi_points(self, points: list[ROIPoint]) -> None:
         """Cập nhật ROI đang sử dụng từ HMI mà không đụng vào frame đang đọc.
@@ -462,6 +501,16 @@ class _CVSafetyWorker(threading.Thread):
         """
         with self._state_lock:
             self._display_mode = mode
+
+    def set_overlay_options(
+        self,
+        show_bounding_boxes: bool,
+        show_foot_points: bool,
+    ) -> None:
+        """Cập nhật độc lập trạng thái hiển thị hộp bao và điểm chân."""
+        with self._state_lock:
+            self._show_bounding_boxes = show_bounding_boxes
+            self._show_foot_points = show_foot_points
 
     def request_source_switch(self, source: VideoSource) -> None:
         """Gửi yêu cầu đổi nguồn để worker thực hiện ngoài GUI thread.
@@ -532,7 +581,10 @@ class _CVSafetyWorker(threading.Thread):
                         list(polygon) for polygon in self._occlusion_polygons
                     ]
                     display_mode = self._display_mode
+                    show_bounding_boxes = self._show_bounding_boxes
+                    show_foot_points = self._show_foot_points
 
+                frame_started = time.perf_counter()
                 analysis = self._cv_processor.process_frame(
                     frame,
                     display_mode=display_mode,
@@ -559,9 +611,13 @@ class _CVSafetyWorker(threading.Thread):
                     analysis,
                     roi_points,
                     safety,
-                    self._last_fps,
                     occlusion_polygons=occlusion_polygons,
+                    show_bounding_boxes=show_bounding_boxes,
+                    show_foot_points=show_foot_points,
                 )
+                self._last_processing_ms = (
+                    time.perf_counter() - frame_started
+                ) * 1000.0
                 self._record_alarm_transition(
                     analysis,
                     safety,
@@ -647,22 +703,24 @@ class _CVSafetyWorker(threading.Thread):
         analysis: FrameAnalysis,
         roi_points: list[ROIPoint],
         safety: SafetyResult,
-        fps: float,
         base_frame: np.ndarray | None = None,
         occlusion_polygons: list[list[ROIPoint]] | None = None,
+        show_bounding_boxes: bool = True,
+        show_foot_points: bool = True,
     ) -> np.ndarray:
-        """Vẽ ROI, bounding box, foot-point và chỉ số HMI lên frame.
+        """Vẽ ROI và các lớp phủ đối tượng được bật lên frame.
 
         Args:
             analysis: Ảnh theo chế độ xem và các phát hiện đã tính.
             roi_points: Đỉnh đa giác ROI cần hiển thị.
             safety: Trạng thái an toàn quyết định màu viền vùng cấm.
-            fps: FPS worker tính từ thời gian xử lý frame.
             base_frame: Ảnh nguồn tùy chọn; None dùng chế độ hiển thị đang chọn.
             occlusion_polygons: Các vùng thân máy không phủ màu ROI.
+            show_bounding_boxes: Bật/tắt khung chữ nhật cho từng đối tượng.
+            show_foot_points: Bật/tắt điểm chân của từng đối tượng.
 
         Returns:
-            Bản sao frame BGR có lớp phủ phục vụ HMI và lưu bằng chứng.
+            Bản sao frame BGR có ROI và các lớp phủ được bật.
         """
         rendered = (
             analysis.display_frame.copy()
@@ -687,26 +745,17 @@ class _CVSafetyWorker(threading.Thread):
             x, y, width, height = detection.bounding_box
             inside = safety.foot_point == detection.foot_point and safety.inside_roi
             object_color = (30, 30, 240) if inside else (35, 155, 75)
-            cv2.rectangle(
-                rendered,
-                (x, y),
-                (x + width, y + height),
-                object_color,
-                2,
-            )
-            cv2.circle(rendered, detection.foot_point, 5, object_color, -1)
+            if show_bounding_boxes:
+                cv2.rectangle(
+                    rendered,
+                    (x, y),
+                    (x + width, y + height),
+                    object_color,
+                    2,
+                )
+            if show_foot_points:
+                cv2.circle(rendered, detection.foot_point, 5, object_color, -1)
 
-        cv2.putText(
-            rendered,
-            f"FPS {fps:04.1f} | {safety.state.value} | "
-            f"{len(analysis.detections)} doi tuong",
-            (10, 22),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            (35, 45, 55),
-            2,
-            cv2.LINE_AA,
-        )
         return rendered
 
     def _record_alarm_transition(
@@ -749,7 +798,6 @@ class _CVSafetyWorker(threading.Thread):
                         analysis,
                         roi_points,
                         safety,
-                        self._last_fps,
                         base_frame=analysis.rgb_frame,
                         occlusion_polygons=occlusion_polygons,
                     )
@@ -858,10 +906,98 @@ class SnapshotPreviewDialog(QDialog):
         )
 
 
+class SnapshotCardWidget(QFrame):
+    """Thẻ Snapshot có thumbnail trực tiếp và khả năng mở ảnh gốc."""
+
+    activated = pyqtSignal(object)
+
+    def __init__(
+        self,
+        event: AuditEvent,
+        parent: QWidget | None = None,
+    ) -> None:
+        """Tạo thẻ ảnh kiểm toán với thời gian, thời lượng và liên kết xem."""
+        super().__init__(parent)
+        self._event = event
+        self.setObjectName("snapshotCard")
+        self.setFixedSize(180, 138)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(7, 7, 7, 7)
+        layout.setSpacing(5)
+
+        image_container = QWidget()
+        image_container.setFixedSize(164, 84)
+        image_container.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents
+        )
+        image_layout = QGridLayout(image_container)
+        image_layout.setContentsMargins(0, 0, 0, 0)
+        image = QLabel()
+        image.setObjectName("snapshotThumbnail")
+        image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        image.setFixedSize(164, 84)
+        pixmap = QPixmap(str(event.image_path))
+        if pixmap.isNull():
+            image.setText("Không đọc được ảnh")
+        else:
+            image.setPixmap(
+                pixmap.scaled(
+                    image.size(),
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        image.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        image_layout.addWidget(image, 0, 0)
+        badge = QLabel(f"[Ảnh {event.occurred_at:%H:%M:%S}]")
+        badge.setObjectName("snapshotBadge")
+        badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        badge.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        image_layout.addWidget(
+            badge,
+            0,
+            0,
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
+        )
+        layout.addWidget(image_container)
+
+        footer = QHBoxLayout()
+        duration = QLabel(f"Vi phạm: {event.violation_duration:.1f}s")
+        duration.setObjectName("snapshotDuration")
+        view_label = QLabel("Xem →")
+        view_label.setObjectName("snapshotLink")
+        duration.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        view_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        footer.addWidget(duration)
+        footer.addStretch(1)
+        footer.addWidget(view_label)
+        layout.addLayout(footer)
+
+    def mousePressEvent(self, event: object) -> None:
+        """Chấp nhận thao tác nhấn trái để nhận click trên toàn bộ thẻ."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event: object) -> None:
+        """Mở ảnh khi người dùng click vào bất kỳ vị trí nào trên thẻ."""
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.rect().contains(event.position().toPoint())
+        ):
+            self.activated.emit(self._event)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class HMIMainWindow(QMainWindow):
     """Cửa sổ HMI chính kết nối stream, vision, safety, config và audit."""
 
     webcams_scanned = pyqtSignal(list, str)
+    camera_test_completed = pyqtSignal(bool, str)
 
     def __init__(
         self,
@@ -910,6 +1046,7 @@ class HMIMainWindow(QMainWindow):
         self._setup_mode = False
         self._filtered_events: list[AuditEvent] = audit_logger.get_events()
         self._carousel_fingerprint: tuple[tuple[str, bool, float], ...] = ()
+        self._audit_table_fingerprint: tuple[tuple[str, float], ...] = ()
         self._last_canvas_state: tuple[SafetyState, StreamState, bool] | None = None
         self._shutdown_complete = False
 
@@ -917,6 +1054,7 @@ class HMIMainWindow(QMainWindow):
         self.resize(1500, 940)
         self.setMinimumSize(1120, 760)
         self.webcams_scanned.connect(self._on_webcams_scanned)
+        self.camera_test_completed.connect(self._on_camera_test_completed)
         self._build_ui()
         self._apply_styles()
         self._load_source_form()
@@ -929,13 +1067,17 @@ class HMIMainWindow(QMainWindow):
             self._active_roi,
             self._occlusion_polygons,
         )
+        self._worker.set_overlay_options(
+            self._show_bounding_box_checkbox.isChecked(),
+            self._show_foot_point_checkbox.isChecked(),
+        )
         self._worker.start()
         self._ui_timer = QTimer(self)
         self._ui_timer.setInterval(33)
         self._ui_timer.timeout.connect(self._refresh_hmi)
         self._ui_timer.start()
         self._audit_timer = QTimer(self)
-        self._audit_timer.setInterval(500)
+        self._audit_timer.setInterval(120)
         self._audit_timer.timeout.connect(self._refresh_audit_views)
         self._audit_timer.start()
 
@@ -962,9 +1104,10 @@ class HMIMainWindow(QMainWindow):
         """
         central_widget = QWidget()
         root_layout = QVBoxLayout(central_widget)
-        root_layout.setContentsMargins(18, 14, 18, 14)
-        root_layout.setSpacing(12)
+        root_layout.setContentsMargins(16, 12, 16, 12)
+        root_layout.setSpacing(10)
         central_widget.setObjectName("centralWidget")
+        self._camera_dialog = self._build_camera_connection_dialog()
         root_layout.addWidget(self._build_header())
 
         vertical_splitter = QSplitter(Qt.Orientation.Vertical)
@@ -977,7 +1120,7 @@ class HMIMainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
 
     def _build_header(self) -> QWidget:
-        """Tạo thanh trạng thái, FPS và chuyển chế độ vận hành/cài đặt.
+        """Tạo header ViewLab với trạng thái nguồn và các thao tác chính.
 
         Args:
             None.
@@ -988,38 +1131,55 @@ class HMIMainWindow(QMainWindow):
         header = QFrame()
         header.setObjectName("header")
         layout = QHBoxLayout(header)
-        layout.setContentsMargins(18, 10, 18, 10)
+        layout.setContentsMargins(16, 10, 16, 10)
+        layout.setSpacing(12)
 
-        title = QLabel("VISIONGUARD")
-        title.setObjectName("brand")
-        subtitle = QLabel("INDUSTRIAL SAFETY HMI")
-        subtitle.setObjectName("muted")
+        logo = QLabel("VL")
+        logo.setObjectName("viewLabLogo")
+        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        logo.setFixedSize(46, 46)
+        layout.addWidget(logo)
+
         brand_stack = QVBoxLayout()
+        brand_stack.setSpacing(2)
+        title = QLabel(
+            "VIEWLAB ENGINEERING | VISIONGUARD HMI ISA-101 Standard"
+        )
+        title.setObjectName("brand")
+        self._system_status = QLabel("ĐANG KHỞI TẠO NGUỒN VIDEO")
+        self._system_status.setObjectName("sourceStatus")
         brand_stack.addWidget(title)
-        brand_stack.addWidget(subtitle)
-        layout.addLayout(brand_stack)
-        layout.addStretch(1)
+        brand_stack.addWidget(self._system_status)
+        layout.addLayout(brand_stack, 3)
 
-        self._system_status = QLabel("ĐANG KHỞI TẠO")
-        self._system_status.setObjectName("statusSafe")
-        self._fps_label = QLabel("FPS: --")
-        self._fps_label.setObjectName("metric")
-        self._people_label = QLabel("ĐỐI TƯỢNG: 0")
-        self._people_label.setObjectName("metric")
-        layout.addWidget(self._system_status)
-        layout.addWidget(self._fps_label)
-        layout.addWidget(self._people_label)
+        self._live_header_label = QLabel("Màn hình Live Stream (Mắt Camera IP)")
+        self._live_header_label.setObjectName("liveHeader")
+        self._live_header_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._live_header_label, 2)
 
-        layout.addWidget(QLabel("CHẾ ĐỘ"))
-        self._mode_combo = QComboBox()
-        self._mode_combo.addItems(["VẬN HÀNH", "CÀI ĐẶT"])
-        self._mode_combo.setObjectName("modeCombo")
-        self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
-        layout.addWidget(self._mode_combo)
+        self._ack_button = QPushButton("XÁC NHẬN / TẮT CÒI")
+        self._ack_button.setObjectName("ackButton")
+        self._ack_button.setMinimumHeight(40)
+        self._ack_button.setEnabled(False)
+        self._ack_button.clicked.connect(self._acknowledge_alarm)
+        layout.addWidget(self._ack_button)
+
+        self._mode_button = QPushButton("Chế độ: Giám sát (Khóa)")
+        self._mode_button.setObjectName("modeButton")
+        self._mode_button.setCheckable(True)
+        self._mode_button.toggled.connect(
+            lambda checked: self._on_mode_changed(1 if checked else 0)
+        )
+        layout.addWidget(self._mode_button)
+
+        self._connect_camera_button = QPushButton("Kết nối Camera IP")
+        self._connect_camera_button.setObjectName("primaryButton")
+        self._connect_camera_button.clicked.connect(self._open_camera_dialog)
+        layout.addWidget(self._connect_camera_button)
         return header
 
     def _build_live_and_side_panel(self) -> QWidget:
-        """Tạo vùng Live Stream 70% và bảng điều khiển bên phải.
+        """Tạo canvas Live Stream và ba thẻ điều khiển an toàn.
 
         Args:
             None.
@@ -1031,11 +1191,11 @@ class HMIMainWindow(QMainWindow):
         video_panel = QFrame()
         video_panel.setObjectName("panel")
         video_layout = QVBoxLayout(video_panel)
-        video_layout.setContentsMargins(14, 14, 14, 14)
-        video_layout.setSpacing(10)
+        video_layout.setContentsMargins(12, 12, 12, 12)
+        video_layout.setSpacing(8)
 
         title_row = QHBoxLayout()
-        title_row.addWidget(QLabel("GIÁM SÁT TRỰC TIẾP"))
+        title_row.addWidget(QLabel("LIVE STREAM"))
         title_row.addStretch(1)
         self._roi_hint = QLabel("ROI: ĐÃ LƯU")
         self._roi_hint.setObjectName("muted")
@@ -1049,6 +1209,8 @@ class HMIMainWindow(QMainWindow):
         video_layout.addWidget(self._canvas, 1)
         self._roi_controls = self._build_roi_controls()
         video_layout.addWidget(self._roi_controls)
+        self._occlusion_controls = self._build_occlusion_controls()
+        video_layout.addWidget(self._occlusion_controls)
         splitter.addWidget(video_panel)
         splitter.addWidget(self._build_side_panel())
         splitter.setStretchFactor(0, 7)
@@ -1057,7 +1219,7 @@ class HMIMainWindow(QMainWindow):
         return splitter
 
     def _build_roi_controls(self) -> QWidget:
-        """Tạo ba nút ROI và các nút hiệu chuẩn mask thân máy riêng biệt.
+        """Tạo đúng ba nút thao tác ROI theo quy trình hiệu chuẩn.
 
         Args:
             None.
@@ -1073,33 +1235,46 @@ class HMIMainWindow(QMainWindow):
         )
         self._delete_roi_point_button = QPushButton("Xóa điểm")
         self._default_roi_button = QPushButton("Mặc định")
+        self._draw_roi_button.setObjectName("primaryButton")
+        self._draw_roi_button.clicked.connect(self._toggle_roi_drawing)
+        self._delete_roi_point_button.clicked.connect(self._delete_roi_point)
+        self._default_roi_button.clicked.connect(self._restore_default_roi)
+        for button in (
+            self._draw_roi_button,
+            self._delete_roi_point_button,
+            self._default_roi_button,
+        ):
+            button.setMinimumHeight(38)
+            layout.addWidget(button, 1)
+        return controls
+
+    def _build_occlusion_controls(self) -> QWidget:
+        """Tạo nhóm hiệu chuẩn mask máy riêng, không lẫn với ba nút ROI."""
+        controls = QWidget()
+        layout = QHBoxLayout(controls)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(QLabel("MASK THÂN MÁY"))
         self._draw_occlusion_button = QPushButton("Vẽ vùng che máy")
         self._undo_occlusion_button = QPushButton("Undo mask")
         self._save_occlusion_button = QPushButton("Lưu mask")
         self._clear_occlusion_button = QPushButton("Xóa mask")
-        self._draw_roi_button.setObjectName("primaryButton")
-        self._save_occlusion_button.setObjectName("primaryButton")
-        self._draw_roi_button.clicked.connect(self._toggle_roi_drawing)
-        self._delete_roi_point_button.clicked.connect(self._delete_roi_point)
-        self._default_roi_button.clicked.connect(self._restore_default_roi)
+        self._save_occlusion_button.setObjectName("secondaryButton")
         self._draw_occlusion_button.clicked.connect(self._start_occlusion_draft)
         self._undo_occlusion_button.clicked.connect(self._undo_occlusion_point)
         self._save_occlusion_button.clicked.connect(self._save_occlusion_polygon)
         self._clear_occlusion_button.clicked.connect(self._clear_occlusion_polygons)
-        layout.addWidget(QLabel("VÙNG CẤM ROI"))
+        for button in (
+            self._draw_occlusion_button,
+            self._undo_occlusion_button,
+            self._save_occlusion_button,
+            self._clear_occlusion_button,
+        ):
+            layout.addWidget(button)
         layout.addStretch(1)
-        layout.addWidget(self._draw_roi_button)
-        layout.addWidget(self._delete_roi_point_button)
-        layout.addWidget(self._default_roi_button)
-        layout.addWidget(QLabel("MASK THÂN MÁY"))
-        layout.addWidget(self._draw_occlusion_button)
-        layout.addWidget(self._undo_occlusion_button)
-        layout.addWidget(self._save_occlusion_button)
-        layout.addWidget(self._clear_occlusion_button)
         return controls
 
     def _build_side_panel(self) -> QWidget:
-        """Tạo ACK, bộ chọn view/source và sliders cấu hình kỹ thuật.
+        """Tạo ba thẻ thông số, cấu hình thuật toán và tùy chọn HUD.
 
         Args:
             None.
@@ -1107,42 +1282,192 @@ class HMIMainWindow(QMainWindow):
         Returns:
             Side Panel cuộn được khi cửa sổ có chiều cao nhỏ.
         """
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        panel = QFrame()
-        panel.setObjectName("panel")
+        panel = QWidget()
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(12)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
 
-        layout.addWidget(QLabel("ĐIỀU KHIỂN AN TOÀN"))
-        self._ack_button = QPushButton("XÁC NHẬN SỰ CỐ\n/ TẮT CÒI (ACK)")
-        self._ack_button.setObjectName("ackButton")
-        self._ack_button.setMinimumHeight(78)
-        self._ack_button.setEnabled(False)
-        self._ack_button.clicked.connect(self._acknowledge_alarm)
-        layout.addWidget(self._ack_button)
+        operations_card = QFrame()
+        operations_card.setObjectName("controlCard")
+        operations_layout = QVBoxLayout(operations_card)
+        operations_layout.setContentsMargins(12, 10, 12, 10)
+        operations_layout.setSpacing(8)
+        state_header = QHBoxLayout()
+        state_title = QLabel("1. BẢNG THÔNG SỐ VẬN HÀNH")
+        state_title.setObjectName("cardTitle")
+        state_title.setWordWrap(True)
+        state_header.addWidget(state_title)
+        state_header.addStretch(1)
+        self._safety_badge = QLabel("AN TOÀN")
+        self._safety_badge.setObjectName("statusSafe")
+        state_header.addWidget(self._safety_badge)
+        operations_layout.addLayout(state_header)
+
+        metric_grid = QGridLayout()
+        metric_grid.setSpacing(6)
+        self._people_value = QLabel("00")
+        self._shift_alarms_value = QLabel("00")
+        self._machine_state_value = QLabel("ĐANG CHẠY")
+        self._add_metric_box(
+            metric_grid, 0, "NGƯỜI TRONG KHUNG", self._people_value
+        )
+        self._add_metric_box(
+            metric_grid, 1, "CẢNH BÁO CA NÀY", self._shift_alarms_value
+        )
+        self._add_metric_box(
+            metric_grid, 2, "TRẠNG THÁI MÁY", self._machine_state_value
+        )
+        operations_layout.addLayout(metric_grid)
+        self._intrusion_buffer_label = QLabel(
+            "Bộ đệm thời gian xâm nhập: 0.00s / 0.80s"
+        )
+        self._intrusion_buffer_label.setWordWrap(True)
+        operations_layout.addWidget(self._intrusion_buffer_label)
+        self._intrusion_progress = QProgressBar()
+        self._intrusion_progress.setRange(0, 1000)
+        self._intrusion_progress.setValue(0)
+        self._intrusion_progress.setTextVisible(False)
+        self._intrusion_progress.setFixedHeight(8)
+        operations_layout.addWidget(self._intrusion_progress)
         self._estop_status = QLabel("E-STOP: KHÔNG KÍCH HOẠT")
         self._estop_status.setObjectName("muted")
-        layout.addWidget(self._estop_status)
+        operations_layout.addWidget(self._estop_status)
+        layout.addWidget(operations_card)
 
-        layout.addWidget(self._section_separator())
-        layout.addWidget(QLabel("CHẾ ĐỘ HIỂN THỊ"))
+        tuning_card = QFrame()
+        tuning_card.setObjectName("controlCard")
+        tuning_layout = QVBoxLayout(tuning_card)
+        tuning_layout.setContentsMargins(12, 10, 12, 10)
+        tuning_layout.setSpacing(6)
+        tuning_title = QLabel("2. CẤU HÌNH THUẬT TOÁN & CAMERA")
+        tuning_title.setObjectName("cardTitle")
+        tuning_title.setWordWrap(True)
+        tuning_layout.addWidget(tuning_title)
+        tuning_layout.addWidget(QLabel("Độ trễ báo động (s)"))
+        self._delay_value = QLabel()
+        self._delay_slider = QSlider(Qt.Orientation.Horizontal)
+        self._delay_slider.setRange(0, 30)
+        self._delay_slider.setSingleStep(1)
+        self._delay_slider.setValue(
+            round(float(self._config["violation_delay"]) * 10)
+        )
+        self._delay_slider.valueChanged.connect(self._on_delay_changed)
+        tuning_layout.addWidget(self._delay_slider)
+        tuning_layout.addWidget(self._delay_value)
+        tuning_layout.addWidget(QLabel("Ngưỡng minArea (px²)"))
+        self._min_area_value = QLabel()
+        self._min_area_slider = QSlider(Qt.Orientation.Horizontal)
+        self._min_area_slider.setRange(500, 5000)
+        self._min_area_slider.setSingleStep(100)
+        self._min_area_slider.setValue(int(self._config["min_area"]))
+        self._min_area_slider.valueChanged.connect(self._on_min_area_changed)
+        tuning_layout.addWidget(self._min_area_slider)
+        tuning_layout.addWidget(self._min_area_value)
+        reset_parameters_button = QPushButton("Reset chuẩn")
+        reset_parameters_button.setObjectName("secondaryButton")
+        reset_parameters_button.clicked.connect(self._reset_standard_parameters)
+        tuning_layout.addWidget(reset_parameters_button)
+        self._tuning_save_timer = QTimer(self)
+        self._tuning_save_timer.setSingleShot(True)
+        self._tuning_save_timer.setInterval(300)
+        self._tuning_save_timer.timeout.connect(self._save_tuning_config)
+        layout.addWidget(tuning_card)
+
+        overlay_card = QFrame()
+        overlay_card.setObjectName("controlCard")
+        overlay_layout = QVBoxLayout(overlay_card)
+        overlay_layout.setContentsMargins(12, 10, 12, 10)
+        overlay_layout.setSpacing(6)
+        overlay_title = QLabel("3. BỘ LỌC HIỂN THỊ (HUD OVERLAY)")
+        overlay_title.setObjectName("cardTitle")
+        overlay_title.setWordWrap(True)
+        overlay_layout.addWidget(overlay_title)
+        overlay_options = self._config.get("display_overlays", {})
+        self._show_bounding_box_checkbox = QCheckBox("Khung Bounding Box")
+        self._show_bounding_box_checkbox.setChecked(
+            bool(overlay_options.get("bounding_box", True))
+        )
+        self._show_foot_point_checkbox = QCheckBox("Tọa độ Điểm chân")
+        self._show_foot_point_checkbox.setChecked(
+            bool(overlay_options.get("foot_point", True))
+        )
+        self._show_bounding_box_checkbox.toggled.connect(
+            self._on_overlay_options_changed
+        )
+        self._show_foot_point_checkbox.toggled.connect(
+            self._on_overlay_options_changed
+        )
+        overlay_layout.addWidget(self._show_bounding_box_checkbox)
+        overlay_layout.addWidget(self._show_foot_point_checkbox)
         self._display_combo = QComboBox()
         self._display_combo.addItem("RGB Thực tế", DisplayMode.RGB)
         self._display_combo.addItem("MOG2 Mask", DisplayMode.MOG2_MASK)
         self._display_combo.addItem("Canny Edge", DisplayMode.CANNY_EDGE)
         self._display_combo.currentIndexChanged.connect(self._on_display_changed)
-        layout.addWidget(self._display_combo)
-
-        layout.addWidget(self._section_separator())
-        layout.addWidget(QLabel("NGUỒN VIDEO"))
-        self._source_combo = QComboBox()
-        self._source_combo.addItems(
-            ["Webcam 0", "File Video (.mp4/.avi)", "RTSP Stream"]
+        overlay_layout.addWidget(self._display_combo)
+        layout.addWidget(overlay_card)
+        layout.addStretch(1)
+        self._refresh_slider_labels()
+        self._side_panel = QScrollArea()
+        self._side_panel.setWidgetResizable(True)
+        self._side_panel.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
-        self._source_combo.currentIndexChanged.connect(self._on_source_mode_changed)
-        layout.addWidget(self._source_combo)
+        self._side_panel.setFrameShape(QFrame.Shape.NoFrame)
+        self._side_panel.setWidget(panel)
+        return self._side_panel
+
+    @staticmethod
+    def _add_metric_box(
+        layout: QGridLayout,
+        column: int,
+        title: str,
+        value_label: QLabel,
+    ) -> None:
+        """Đặt một chỉ số vận hành trong ô nền trung tính."""
+        box = QFrame()
+        box.setObjectName("metricBox")
+        box_layout = QVBoxLayout(box)
+        box_layout.setContentsMargins(8, 6, 8, 6)
+        box_layout.setSpacing(2)
+        caption = QLabel(title)
+        caption.setObjectName("metricCaption")
+        caption.setWordWrap(True)
+        value_label.setObjectName("metricValue")
+        box_layout.addWidget(caption)
+        box_layout.addWidget(value_label)
+        layout.addWidget(box, column, 0)
+
+    def _build_camera_connection_dialog(self) -> QDialog:
+        """Tạo modal cấu hình Webcam, file video hoặc RTSP camera."""
+        dialog = QDialog(self)
+        dialog.setObjectName("cameraDialog")
+        dialog.setWindowTitle("Cấu hình Kết nối Camera IP (RTSP Stream)")
+        dialog.setModal(True)
+        dialog.setMinimumWidth(620)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(22, 18, 22, 18)
+        layout.setSpacing(12)
+        title = QLabel("Cấu hình Kết nối Camera IP")
+        title.setObjectName("dialogTitle")
+        layout.addWidget(title)
+
+        self._source_combo = QComboBox()
+        self._source_combo.addItem(
+            "Webcam máy tính (Tự động dò 0, 1, 2...)", "webcam"
+        )
+        self._source_combo.addItem(
+            "Tệp Video thực nghiệm (.mp4, .avi)", "file"
+        )
+        self._source_combo.addItem(
+            "Camera IP qua RTSP (Mạng LAN nội bộ)", "rtsp"
+        )
+        source_form = QFormLayout()
+        source_form.addRow("Chế độ Nguồn (INPUT_SOURCE)", self._source_combo)
+        layout.addLayout(source_form)
+        self._source_combo.currentIndexChanged.connect(
+            self._on_source_mode_changed
+        )
 
         self._webcam_device_combo = QComboBox()
         self._webcam_device_combo.addItem("Tự động dò (Auto)", "auto")
@@ -1153,8 +1478,7 @@ class HMIMainWindow(QMainWindow):
             configured_device, bool
         ):
             self._webcam_device_combo.addItem(
-                f"Webcam {configured_device}",
-                configured_device,
+                f"Webcam {configured_device}", configured_device
             )
         self._scan_webcams_button = QPushButton("Dò webcam")
         self._scan_webcams_button.clicked.connect(self._request_webcam_scan)
@@ -1177,63 +1501,66 @@ class HMIMainWindow(QMainWindow):
         layout.addWidget(self._file_source_group)
 
         self._rtsp_url_edit = QLineEdit()
-        self._rtsp_url_edit.setPlaceholderText("rtsp:// hoặc địa chỉ camera")
+        self._rtsp_url_edit.setPlaceholderText("Địa chỉ IP hoặc URL RTSP")
         self._rtsp_port_edit = QLineEdit("554")
-        self._rtsp_port_edit.setMaximumWidth(82)
+        self._rtsp_port_edit.setMaximumWidth(110)
         self._rtsp_user_edit = QLineEdit()
-        self._rtsp_user_edit.setPlaceholderText("Username")
+        self._rtsp_user_edit.setPlaceholderText("Tài khoản")
         self._rtsp_password_edit = QLineEdit()
-        self._rtsp_password_edit.setPlaceholderText("Password")
+        self._rtsp_password_edit.setPlaceholderText("Mật khẩu")
         self._rtsp_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self._rtsp_profile_combo = QComboBox()
-        self._rtsp_profile_combo.addItems(["ONVIF", "Hikvision", "Dahua"])
+        self._rtsp_profile_combo.addItems(
+            ["Dahua/Imou", "Hikvision/Ezviz", "ONVIF"]
+        )
         self._rtsp_path_edit = QLineEdit("/Streaming/Channels/101")
         self._rtsp_source_group = QWidget()
         rtsp_form = QFormLayout(self._rtsp_source_group)
-        rtsp_form.addRow("URL / IP", self._rtsp_url_edit)
-        rtsp_form.addRow("Port", self._rtsp_port_edit)
-        rtsp_form.addRow("Username", self._rtsp_user_edit)
-        rtsp_form.addRow("Password", self._rtsp_password_edit)
-        rtsp_form.addRow("Profile", self._rtsp_profile_combo)
-        rtsp_form.addRow("Path", self._rtsp_path_edit)
+        rtsp_form.addRow("Profile Hãng Camera", self._rtsp_profile_combo)
+        rtsp_form.addRow("Địa chỉ IP Camera / URL", self._rtsp_url_edit)
+        rtsp_form.addRow("Cổng RTSP", self._rtsp_port_edit)
+        rtsp_form.addRow("Tài khoản", self._rtsp_user_edit)
+        rtsp_form.addRow("Mật khẩu", self._rtsp_password_edit)
+        rtsp_form.addRow("RTSP Path", self._rtsp_path_edit)
+        for field in (
+            self._rtsp_url_edit,
+            self._rtsp_port_edit,
+            self._rtsp_user_edit,
+            self._rtsp_password_edit,
+            self._rtsp_path_edit,
+        ):
+            field.textChanged.connect(self._update_rtsp_preview)
+        self._rtsp_profile_combo.currentIndexChanged.connect(
+            self._update_rtsp_preview
+        )
         layout.addWidget(self._rtsp_source_group)
-        self._apply_source_button = QPushButton("ÁP DỤNG / CHUYỂN NGUỒN")
+
+        layout.addWidget(QLabel("Chuỗi kết nối OpenCV (cv2.VideoCapture)"))
+        self._rtsp_preview_edit = QLineEdit()
+        self._rtsp_preview_edit.setReadOnly(True)
+        self._rtsp_preview_edit.setObjectName("connectionPreview")
+        layout.addWidget(self._rtsp_preview_edit)
+        self._camera_test_status = QLabel("Chưa kiểm tra kết nối.")
+        self._camera_test_status.setObjectName("muted")
+        layout.addWidget(self._camera_test_status)
+
+        buttons = QHBoxLayout()
+        self._camera_test_button = QPushButton("Kiểm tra kết nối (Ping)")
+        self._camera_test_button.setObjectName("secondaryButton")
+        self._camera_test_button.clicked.connect(
+            self._test_camera_connection
+        )
+        close_button = QPushButton("Đóng")
+        close_button.clicked.connect(dialog.reject)
+        self._apply_source_button = QPushButton("Lưu & Áp dụng")
         self._apply_source_button.setObjectName("primaryButton")
         self._apply_source_button.clicked.connect(self._apply_video_source)
-        layout.addWidget(self._apply_source_button)
-
-        layout.addWidget(self._section_separator())
-        layout.addWidget(QLabel("THAM SỐ PHÁT HIỆN"))
-        self._min_area_value = QLabel()
-        self._min_area_slider = QSlider(Qt.Orientation.Horizontal)
-        self._min_area_slider.setRange(500, 5000)
-        self._min_area_slider.setSingleStep(100)
-        self._min_area_slider.setValue(int(self._config["min_area"]))
-        self._min_area_slider.valueChanged.connect(self._on_min_area_changed)
-        layout.addWidget(QLabel("Diện tích tối thiểu S_min"))
-        layout.addWidget(self._min_area_slider)
-        layout.addWidget(self._min_area_value)
-
-        self._delay_value = QLabel()
-        self._delay_slider = QSlider(Qt.Orientation.Horizontal)
-        self._delay_slider.setRange(0, 30)
-        self._delay_slider.setSingleStep(1)
-        self._delay_slider.setValue(
-            round(float(self._config["violation_delay"]) * 10)
-        )
-        self._delay_slider.valueChanged.connect(self._on_delay_changed)
-        self._tuning_save_timer = QTimer(self)
-        self._tuning_save_timer.setSingleShot(True)
-        self._tuning_save_timer.setInterval(300)
-        self._tuning_save_timer.timeout.connect(self._save_tuning_config)
-        layout.addWidget(QLabel("Độ trễ báo động"))
-        layout.addWidget(self._delay_slider)
-        layout.addWidget(self._delay_value)
-        layout.addStretch(1)
-
-        scroll.setWidget(panel)
-        self._refresh_slider_labels()
-        return scroll
+        buttons.addWidget(self._camera_test_button)
+        buttons.addStretch(1)
+        buttons.addWidget(close_button)
+        buttons.addWidget(self._apply_source_button)
+        layout.addLayout(buttons)
+        return dialog
 
     def _build_bottom_dock(self) -> QWidget:
         """Tạo Snapshot Carousel bên trái và bộ lọc/bảng audit bên phải.
@@ -1359,83 +1686,160 @@ class HMIMainWindow(QMainWindow):
         return separator
 
     def _apply_styles(self) -> None:
-        """Áp dụng theme ISA-101 sáng, màu đỏ đô và bo góc hiện đại.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-        """
+        """Áp dụng bảng màu ViewLab sáng, phẳng và theo ISA-101."""
         self.setStyleSheet(
             """
             QWidget {
-                color: #24262B;
+                color: #1E293B;
                 font-family: "Segoe UI";
-                font-size: 10pt;
+                font-size: 9pt;
             }
-            QMainWindow, QWidget#centralWidget { background: #F5F5F7; }
-            QFrame#header, QFrame#panel {
+            QMainWindow, QWidget#centralWidget { background: #F1F5F9; }
+            QFrame#header, QFrame#panel, QFrame#controlCard,
+            QDialog#cameraDialog {
                 background: #FFFFFF;
-                border: 1px solid #E5E7EB;
-                border-radius: 12px;
+                border: 1px solid #E2E8F0;
+                border-radius: 14px;
+            }
+            QFrame#controlCard { border-radius: 12px; }
+            QLabel#viewLabLogo {
+                color: #FFFFFF;
+                background: #9B1B30;
+                border-radius: 23px;
+                font-size: 16pt;
+                font-weight: 800;
             }
             QLabel#brand {
                 color: #9B1B30;
-                font-size: 18pt;
+                font-size: 11pt;
                 font-weight: 800;
-                letter-spacing: 1px;
             }
-            QLabel#muted { color: #747985; }
-            QLabel#metric, QLabel#statusSafe, QLabel#statusWarning,
-            QLabel#statusAlarm {
-                padding: 7px 11px;
-                border-radius: 8px;
-                background: #F1F5F4;
+            QLabel#liveHeader {
+                color: #334155;
+                font-size: 11pt;
                 font-weight: 700;
             }
-            QLabel#statusSafe { color: #087C67; background: #E8F5F1; }
-            QLabel#statusWarning { color: #9A5A00; background: #FFF4D6; }
+            QLabel#cardTitle {
+                color: #334155;
+                font-weight: 800;
+            }
+            QLabel#sourceStatus, QLabel#muted { color: #64748B; }
+            QLabel#sourceStatusOnline { color: #10B981; font-weight: 700; }
+            QLabel#sourceStatusError { color: #B45309; font-weight: 700; }
+            QLabel#statusSafe, QLabel#statusWarning, QLabel#statusAlarm {
+                padding: 5px 10px;
+                border-radius: 8px;
+                font-weight: 700;
+            }
+            QLabel#statusSafe { color: #FFFFFF; background: #10B981; }
+            QLabel#statusWarning { color: #B45309; background: #FEF3C7; }
             QLabel#statusAlarm { color: #FFFFFF; background: #E11D48; }
             QLabel#videoCanvas {
-                border: 1px solid #30343B;
-                border-radius: 8px;
+                border: 1px solid #CBD5E1;
+                border-radius: 10px;
             }
             QPushButton, QToolButton, QComboBox, QLineEdit, QTimeEdit {
-                min-height: 30px;
-                border: 1px solid #D8DAE0;
-                border-radius: 7px;
-                padding: 3px 8px;
+                min-height: 32px;
+                border: 1px solid #CBD5E1;
+                border-radius: 9px;
+                padding: 4px 9px;
                 background: #FFFFFF;
             }
             QPushButton:hover, QToolButton:hover { border-color: #9B1B30; }
-            QPushButton:disabled { color: #9A9DA5; background: #ECEEF1; }
+            QPushButton:disabled { color: #94A3B8; background: #F1F5F9; }
             QPushButton#primaryButton {
                 color: #FFFFFF;
                 background: #9B1B30;
                 border: 0;
                 font-weight: 700;
-                padding: 7px 12px;
+                padding: 7px 11px;
             }
             QPushButton#primaryButton:hover { background: #7F1427; }
             QPushButton#ackButton {
                 color: #FFFFFF;
-                background: #9B1B30;
+                background: #D97706;
                 border: 0;
-                border-radius: 10px;
+                border-radius: 9px;
+                font-weight: 800;
+            }
+            QPushButton#ackButton:hover { background: #B45309; }
+            QPushButton#ackButton:disabled {
+                color: #94A3B8;
+                background: #E2E8F0;
+            }
+            QPushButton#modeButton:checked {
+                color: #FFFFFF;
+                background: #334155;
+            }
+            QPushButton#secondaryButton {
+                color: #334155;
+                background: #F8FAFC;
+                border: 1px solid #CBD5E1;
+            }
+            QLabel#metricCaption {
+                color: #64748B;
+                font-size: 7pt;
+                font-weight: 700;
+            }
+            QLabel#metricValue {
+                color: #0F172A;
                 font-size: 12pt;
                 font-weight: 800;
             }
-            QPushButton#ackButton:disabled {
-                color: #888B92;
-                background: #E7E8EB;
+            QFrame#metricBox {
+                background: #F8FAFC;
+                border: 1px solid #E2E8F0;
+                border-radius: 9px;
+            }
+            QLabel#snapshotBadge {
+                color: #FFFFFF;
+                background: #9B1B30;
+                border-radius: 6px;
+                padding: 3px 6px;
+                font-size: 8pt;
+                font-weight: 700;
+            }
+            QFrame#snapshotCard {
+                background: #FFFFFF;
+                border: 1px solid #F3C7CE;
+                border-radius: 12px;
+            }
+            QFrame#snapshotCard:hover {
+                border: 1px solid #9B1B30;
+                background: #FFF8F8;
+            }
+            QLabel#snapshotThumbnail {
+                color: #64748B;
+                background: #E2E8F0;
+                border-radius: 8px;
+            }
+            QLabel#snapshotDuration {
+                color: #334155;
+                font-size: 8pt;
+                font-weight: 700;
+            }
+            QLabel#snapshotLink {
+                color: #9B1B30;
+                font-size: 8pt;
+                font-weight: 800;
+            }
+            QLabel#dialogTitle {
+                color: #9B1B30;
+                font-size: 14pt;
+                font-weight: 800;
+            }
+            QLineEdit#connectionPreview {
+                color: #E2E8F0;
+                background: #0F172A;
+                border: 0;
+                font-family: Consolas;
             }
             QComboBox::drop-down, QTimeEdit::up-button,
             QTimeEdit::down-button { border: 0; width: 18px; }
             QSlider::groove:horizontal {
                 height: 5px;
-                background: #E4E6EA;
-                border-radius: 2px;
+                background: #E2E8F0;
+                border-radius: 3px;
             }
             QSlider::handle:horizontal {
                 width: 15px;
@@ -1444,25 +1848,33 @@ class HMIMainWindow(QMainWindow):
                 background: #9B1B30;
             }
             QTableWidget {
-                border: 1px solid #E5E7EB;
-                border-radius: 8px;
-                gridline-color: #ECEEF1;
-                alternate-background-color: #F8F9FA;
+                border: 1px solid #E2E8F0;
+                border-radius: 9px;
+                gridline-color: #F1F5F9;
+                alternate-background-color: #F8FAFC;
                 background: #FFFFFF;
             }
             QHeaderView::section {
-                background: #F0F1F3;
+                background: #F1F5F9;
                 border: 0;
                 padding: 5px;
                 font-weight: 700;
             }
-            QFrame#separator { color: #E5E7EB; }
+            QProgressBar {
+                border: 0;
+                border-radius: 4px;
+                background: #E2E8F0;
+            }
+            QProgressBar::chunk {
+                border-radius: 4px;
+                background: #D97706;
+            }
             QScrollArea { border: 0; background: transparent; }
             """
         )
 
     def _load_source_form(self) -> None:
-        """Nạp cấu hình nguồn và RTSP vào các trường trên Side Panel.
+        """Nạp cấu hình nguồn vào modal cấu hình camera hiện hành.
 
         Args:
             None.
@@ -1484,10 +1896,145 @@ class HMIMainWindow(QMainWindow):
         self._rtsp_user_edit.setText(source_config.get("username", ""))
         self._rtsp_password_edit.setText(source_config.get("password", ""))
         profile = source_config.get("profile", "ONVIF")
-        profile_index = self._rtsp_profile_combo.findText(profile)
+        profile_labels = {
+            "Dahua": "Dahua/Imou",
+            "Hikvision": "Hikvision/Ezviz",
+            "ONVIF": "ONVIF",
+        }
+        profile_index = self._rtsp_profile_combo.findText(
+            profile_labels.get(profile, profile)
+        )
         if profile_index >= 0:
             self._rtsp_profile_combo.setCurrentIndex(profile_index)
         self._on_source_mode_changed()
+        self._update_rtsp_preview()
+
+    def _open_camera_dialog(self) -> None:
+        """Hiển thị hộp thoại cấu hình camera ở chế độ modal."""
+        self._camera_dialog.exec()
+
+    def _update_rtsp_preview(self, index: int | None = None) -> None:
+        """Cập nhật chuỗi VideoCapture theo dữ liệu RTSP đang nhập."""
+        del index
+        if self._source_combo.currentData() != "rtsp":
+            self._rtsp_preview_edit.setText(
+                "Chọn Camera IP qua RTSP để tạo chuỗi kết nối."
+            )
+            return
+        try:
+            self._rtsp_preview_edit.setText(self._build_rtsp_url())
+        except ValueError:
+            self._rtsp_preview_edit.setText("Nhập IP/URL và cổng RTSP hợp lệ.")
+
+    def _test_camera_connection(self) -> None:
+        """Thử mở và đọc frame camera/file ngoài luồng giao diện."""
+        mode = self._source_combo.currentData()
+        if mode == "webcam":
+            device = self._webcam_device_combo.currentData()
+            source: VideoSource | None = (
+                device if isinstance(device, int) and not isinstance(device, bool)
+                else None
+            )
+            if device != "auto" and source is None:
+                self._camera_test_status.setText(
+                    "Chọn webcam hợp lệ để kiểm tra."
+                )
+                return
+        elif mode == "file":
+            source = self._file_path_edit.text().strip()
+            if not source or not Path(source).is_file():
+                self._camera_test_status.setText("Tệp video không tồn tại.")
+                return
+        else:
+            try:
+                source = self._build_rtsp_url()
+            except ValueError as error:
+                self._camera_test_status.setText(str(error))
+                return
+
+        self._camera_test_button.setEnabled(False)
+        self._camera_test_status.setText("ĐANG KIỂM TRA NGUỒN VIDEO…")
+        threading.Thread(
+            target=self._test_camera_connection_in_background,
+            args=(mode, source),
+            name="VisionGuard-ConnectionTest",
+            daemon=True,
+        ).start()
+
+    def _test_camera_connection_in_background(
+        self,
+        mode: str,
+        source: VideoSource | None,
+    ) -> None:
+        """Mở thử nguồn camera/file, đọc một frame rồi luôn giải phóng."""
+        if mode == "webcam":
+            try:
+                devices = self._stream_manager.scan_available_webcams(5)
+            except Exception as error:
+                LOGGER.exception("Không thể kiểm tra webcam tự động.")
+                self.camera_test_completed.emit(False, str(error))
+                return
+            if source is None:
+                success = bool(devices)
+                message = (
+                    "Webcam tự động hoạt động: "
+                    f"{', '.join(map(str, devices))}."
+                    if success
+                    else "Không tìm thấy webcam hoạt động."
+                )
+            else:
+                success = source in devices
+                message = (
+                    f"Webcam {source} kết nối thành công."
+                    if success
+                    else f"Không mở/đọc được frame từ webcam {source}."
+                )
+            self.camera_test_completed.emit(success, message)
+            return
+
+        capture: cv2.VideoCapture | None = None
+        success = False
+        message = "Không kiểm tra được nguồn video."
+        try:
+            if source is None:
+                raise ValueError("Nguồn video chưa được cấu hình.")
+            capture = cv2.VideoCapture(source)
+            if not capture.isOpened():
+                message = (
+                    "Không mở được nguồn. Kiểm tra địa chỉ, cổng "
+                    "và thông tin đăng nhập."
+                )
+            else:
+                read_success, frame = capture.read()
+                success = read_success and frame is not None
+                message = (
+                    "Kết nối thành công — đã đọc được frame video."
+                    if success
+                    else "Nguồn đã mở nhưng không đọc được frame video."
+                )
+        except (cv2.error, OSError, TypeError, ValueError) as error:
+            LOGGER.exception("Kiểm tra nguồn camera thất bại.")
+            message = str(error)
+        finally:
+            if capture is not None:
+                try:
+                    capture.release()
+                except cv2.error as error:
+                    LOGGER.exception("Không giải phóng được capture thử nghiệm.")
+                    if success:
+                        success = False
+                        message = f"Không giải phóng được capture: {error}"
+        self.camera_test_completed.emit(success, message)
+
+    def _on_camera_test_completed(self, success: bool, message: str) -> None:
+        """Hiển thị kết quả kiểm tra kết nối trong modal."""
+        self._camera_test_button.setEnabled(True)
+        self._camera_test_status.setText(message)
+        self._camera_test_status.setObjectName(
+            "statusSafe" if success else "statusWarning"
+        )
+        self._camera_test_status.style().unpolish(self._camera_test_status)
+        self._camera_test_status.style().polish(self._camera_test_status)
 
     def _request_webcam_scan(self, checked: bool = False) -> None:
         """Khởi chạy dò webcam ở worker để không chặn luồng giao diện.
@@ -1555,7 +2102,7 @@ class HMIMainWindow(QMainWindow):
             None.
         """
         self._webcam_scan_running = False
-        self._scan_webcams_button.setEnabled(self._setup_mode)
+        self._scan_webcams_button.setEnabled(True)
         selected_device = self._webcam_device_combo.currentData()
         self._webcam_device_combo.clear()
         self._webcam_device_combo.addItem("Tự động dò (Auto)", "auto")
@@ -1625,6 +2172,7 @@ class HMIMainWindow(QMainWindow):
         self._system_status.setText(
             f"ĐANG CHUYỂN SANG WEBCAM {device_id}…"
         )
+        self._camera_dialog.accept()
 
     def _on_mode_changed(self, index: int) -> None:
         """Chuyển giao diện giữa thao tác vận hành và cài đặt kỹ thuật.
@@ -1636,6 +2184,15 @@ class HMIMainWindow(QMainWindow):
             None.
         """
         self._setup_mode = index == 1
+        if self._mode_button.isChecked() != self._setup_mode:
+            self._mode_button.blockSignals(True)
+            self._mode_button.setChecked(self._setup_mode)
+            self._mode_button.blockSignals(False)
+        self._mode_button.setText(
+            "Chế độ: Kỹ sư (Setup)"
+            if self._setup_mode
+            else "Chế độ: Giám sát (Khóa)"
+        )
         if not self._setup_mode:
             self._editing_occlusion = False
             self._drawing_roi = False
@@ -1646,16 +2203,11 @@ class HMIMainWindow(QMainWindow):
         self._refresh_canvas_overlay()
         for widget in (
             self._roi_controls,
-            self._source_combo,
-            self._webcam_source_group,
-            self._file_source_group,
-            self._rtsp_source_group,
-            self._apply_source_button,
+            self._occlusion_controls,
             self._min_area_slider,
             self._delay_slider,
         ):
             widget.setEnabled(self._setup_mode)
-        self._on_source_mode_changed()
         self._roi_hint.setText(
             "ROI: ĐANG HIỆU CHUẨN" if self._setup_mode else "ROI: ĐÃ LƯU"
         )
@@ -1691,15 +2243,13 @@ class HMIMainWindow(QMainWindow):
         Returns:
             None.
         """
-        mode_index = self._source_combo.currentIndex()
-        self._webcam_source_group.setVisible(mode_index == 0)
-        self._file_source_group.setVisible(mode_index == 1)
-        self._rtsp_source_group.setVisible(mode_index == 2)
-        self._webcam_device_combo.setEnabled(self._setup_mode)
-        self._scan_webcams_button.setEnabled(
-            self._setup_mode and not self._webcam_scan_running
-        )
-        self._apply_source_button.setEnabled(self._setup_mode)
+        mode = self._source_combo.currentData()
+        self._webcam_source_group.setVisible(mode == "webcam")
+        self._file_source_group.setVisible(mode == "file")
+        self._rtsp_source_group.setVisible(mode == "rtsp")
+        self._webcam_device_combo.setEnabled(not self._webcam_scan_running)
+        self._scan_webcams_button.setEnabled(not self._webcam_scan_running)
+        self._update_rtsp_preview()
 
     def _browse_video_file(self) -> None:
         """Mở hộp thoại chọn file video MP4/AVI cho nguồn offline.
@@ -1780,7 +2330,7 @@ class HMIMainWindow(QMainWindow):
         path = self._rtsp_path_edit.text().strip()
         if not path.startswith("/"):
             path = f"/{path}"
-        if self._rtsp_profile_combo.currentText() == "Dahua" and (
+        if self._rtsp_profile_combo.currentText().startswith("Dahua") and (
             path == "/Streaming/Channels/101"
         ):
             path = "/cam/realmonitor?channel=1&subtype=0"
@@ -1846,7 +2396,13 @@ class HMIMainWindow(QMainWindow):
                     "port": int(self._rtsp_port_edit.text()),
                     "username": self._rtsp_user_edit.text().strip(),
                     "password": self._rtsp_password_edit.text(),
-                    "profile": self._rtsp_profile_combo.currentText(),
+                    "profile": {
+                        "Dahua/Imou": "Dahua",
+                        "Hikvision/Ezviz": "Hikvision",
+                    }.get(
+                        self._rtsp_profile_combo.currentText(),
+                        "ONVIF",
+                    ),
                 }
             )
 
@@ -1864,6 +2420,7 @@ class HMIMainWindow(QMainWindow):
             )
             return
         self._system_status.setText("ĐANG CHUYỂN NGUỒN…")
+        self._camera_dialog.accept()
 
     def _on_display_changed(self, index: int) -> None:
         """Chuyển bộ lọc ảnh mà không dừng tiến trình kiểm tra an toàn.
@@ -1877,6 +2434,49 @@ class HMIMainWindow(QMainWindow):
         mode = self._display_combo.itemData(index)
         if isinstance(mode, DisplayMode):
             self._worker.set_display_mode(mode)
+
+    def _on_overlay_options_changed(self, checked: bool = False) -> None:
+        """Áp dụng và lưu hai công tắc overlay độc lập."""
+        del checked
+        show_boxes = self._show_bounding_box_checkbox.isChecked()
+        show_feet = self._show_foot_point_checkbox.isChecked()
+        self._worker.set_overlay_options(show_boxes, show_feet)
+        try:
+            self._config = self._config_manager.update_config(
+                {
+                    "display_overlays": {
+                        "bounding_box": show_boxes,
+                        "foot_point": show_feet,
+                    }
+                }
+            )
+        except (OSError, TypeError, ValueError):
+            LOGGER.exception("Không thể lưu tùy chọn HUD overlay.")
+            QMessageBox.warning(
+                self,
+                "Không thể lưu tùy chọn",
+                "Đã áp dụng tùy chọn cho phiên hiện tại nhưng chưa lưu được config.json.",
+            )
+
+    def _reset_standard_parameters(self) -> None:
+        """Khôi phục minArea và độ trễ về thông số vận hành mặc định."""
+        self._min_area_slider.setValue(1500)
+        self._delay_slider.setValue(8)
+        try:
+            self._cv_processor.set_min_area(1500.0)
+            self._safety_controller.set_violation_delay(0.8)
+            self._config = self._config_manager.update_config(
+                {"min_area": 1500, "violation_delay": 0.8}
+            )
+        except (OSError, TypeError, ValueError):
+            LOGGER.exception("Không thể khôi phục tham số chuẩn.")
+            QMessageBox.critical(
+                self,
+                "Không thể reset",
+                "Không lưu được tham số chuẩn vào config.json.",
+            )
+            return
+        self._refresh_slider_labels()
 
     def _on_min_area_changed(self, value: int) -> None:
         """Cập nhật ngưỡng contour và lưu đồng bộ vào config.
@@ -2235,7 +2835,6 @@ class HMIMainWindow(QMainWindow):
         if not acknowledged:
             return
         self._ack_button.setEnabled(False)
-        self._system_status.setText("ĐÃ XÁC NHẬN SỰ CỐ")
 
     def _on_filter_mode_changed(self, index: int | None = None) -> None:
         """Bật trường nhập giờ khi chọn lọc khoảng giờ tùy chỉnh.
@@ -2281,6 +2880,10 @@ class HMIMainWindow(QMainWindow):
             return
 
         self._filtered_events = filtered
+        self._audit_table_fingerprint = tuple(
+            (event.event_id, event.violation_duration)
+            for event in filtered
+        )
         self._render_audit_table(filtered)
         self._refresh_carousel(filtered)
 
@@ -2336,34 +2939,8 @@ class HMIMainWindow(QMainWindow):
                 widget.deleteLater()
 
         for event in reversed(visible_events):
-            card = QPushButton()
-            card.setObjectName("snapshotCard")
-            card.setFixedSize(188, 132)
-            card_layout = QVBoxLayout(card)
-            thumbnail = QLabel()
-            thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            pixmap = QPixmap(str(event.image_path))
-            if not pixmap.isNull():
-                thumbnail.setPixmap(
-                    pixmap.scaled(
-                        164,
-                        82,
-                        Qt.AspectRatioMode.KeepAspectRatio,
-                        Qt.TransformationMode.SmoothTransformation,
-                    )
-                )
-            else:
-                thumbnail.setText("Không đọc được ảnh")
-            card_layout.addWidget(thumbnail)
-            card_layout.addWidget(
-                QLabel(
-                    f"Ảnh {event.occurred_at:%H:%M:%S} | "
-                    f"Vi phạm: {event.violation_duration:.1f}s"
-                )
-            )
-            card.clicked.connect(
-                lambda checked=False, selected=event: self._open_snapshot(selected)
-            )
+            card = SnapshotCardWidget(event)
+            card.activated.connect(self._open_snapshot)
             self._carousel_layout.addWidget(card)
 
         self._carousel_layout.addStretch(1)
@@ -2459,7 +3036,7 @@ class HMIMainWindow(QMainWindow):
         )
 
     def _refresh_hmi(self) -> None:
-        """Đọc queue worker và cập nhật canvas, FPS, trạng thái và nút ACK.
+        """Cập nhật video, HUD, trạng thái an toàn và chỉ số vận hành.
 
         Args:
             None.
@@ -2470,6 +3047,9 @@ class HMIMainWindow(QMainWindow):
         status = self._stream_manager.read_latest_status(timeout=0.0)
         if status is not None:
             self._update_system_status(status.state, status.message)
+        else:
+            status = self._stream_manager.status
+            self._update_system_status(status.state, status.message)
 
         packet = self._worker.take_latest_result()
         if packet is not None:
@@ -2478,17 +3058,46 @@ class HMIMainWindow(QMainWindow):
                 LOGGER.error("HMI nhận lỗi worker: %s", packet.error_message)
             if packet.frame is not None and packet.analysis is not None:
                 self._canvas.set_frame(packet.frame)
-                self._fps_label.setText(f"FPS: {self._worker.fps:.1f}")
-                self._people_label.setText(
-                    f"ĐỐI TƯỢNG: {len(packet.analysis.detections)}"
+                self._people_value.setText(
+                    f"{len(packet.analysis.detections):02d}"
+                )
+                source_name = self._source_display_name()
+                point_score = (
+                    1.0
+                    if packet.safety is not None
+                    and packet.safety.inside_roi
+                    else -1.0
+                )
+                point_state = (
+                    "INTRUSION" if point_score >= 0 else "SAFE"
+                )
+                self._canvas.set_hud_lines(
+                    f"REC • {datetime.now():%H:%M:%S} | {source_name}",
+                    f"cv2.pointPolygonTest: {point_score:+.1f} "
+                    f"({point_state})",
                 )
                 if packet.safety is not None:
-                    self._refresh_safety_status(packet.safety)
+                    self._refresh_safety_status(
+                        packet.safety,
+                        len(packet.analysis.detections),
+                    )
 
         self._ack_button.setEnabled(self._safety_controller.latched)
 
+    def _source_display_name(self) -> str:
+        """Tạo nhãn nguồn ngắn, không đưa thông tin xác thực lên HUD."""
+        source = self._config.get("video_source", {})
+        mode = source.get("mode", "webcam")
+        if mode == "webcam":
+            return f"WEBCAM {source.get('device_id', 0)}"
+        if mode == "file":
+            return f"FILE {Path(source.get('file_path', '')).name}"
+        if mode == "rtsp":
+            return "RTSP CAMERA"
+        return "VIDEO SOURCE"
+
     def _update_system_status(self, state: StreamState, message: str) -> None:
-        """Chuyển trạng thái nguồn camera thành nhãn ISA-101 dễ nhận biết.
+        """Hiển thị nguồn hiện hành, kết nối, FPS và thời gian xử lý.
 
         Args:
             state: Trạng thái kết nối của StreamManager.
@@ -2497,18 +3106,30 @@ class HMIMainWindow(QMainWindow):
         Returns:
             None.
         """
+        source_name = self._source_display_name()
         if state is StreamState.CONNECTED:
-            self._system_status.setObjectName("statusSafe")
+            status_label = "ONLINE"
+            self._system_status.setObjectName("sourceStatusOnline")
         elif state in (StreamState.RECONNECTING, StreamState.ERROR):
-            self._system_status.setObjectName("statusWarning")
+            status_label = message
+            self._system_status.setObjectName("sourceStatusError")
         else:
-            self._system_status.setObjectName("metric")
-        self._system_status.setText(message)
+            status_label = message
+            self._system_status.setObjectName("sourceStatus")
+        self._system_status.setText(
+            f"{source_name} · {status_label} "
+            f"({self._worker.fps:.1f} FPS / "
+            f"{self._worker.processing_ms:.0f} ms)"
+        )
         self._system_status.style().unpolish(self._system_status)
         self._system_status.style().polish(self._system_status)
 
-    def _refresh_safety_status(self, safety: SafetyResult) -> None:
-        """Cập nhật Header, ACK và màu ROI theo máy trạng thái an toàn.
+    def _refresh_safety_status(
+        self,
+        safety: SafetyResult,
+        detection_count: int,
+    ) -> None:
+        """Cập nhật badge, bộ đệm xâm nhập, E-STOP và số liệu ca.
 
         Args:
             safety: Snapshot trạng thái từ SafetyController.
@@ -2522,18 +3143,34 @@ class HMIMainWindow(QMainWindow):
             self._refresh_canvas_overlay()
             self._last_canvas_state = canvas_state
 
-        if safety.state is SafetyState.ALARM:
-            self._system_status.setObjectName("statusAlarm")
-            label = "BÁO ĐỘNG ĐỎ"
-        elif safety.state is SafetyState.WARNING:
-            self._system_status.setObjectName("statusWarning")
-            label = f"CẢNH BÁO SỚM · {safety.violation_duration:.1f}s"
-        else:
-            self._system_status.setObjectName("statusSafe")
-            label = "AN TOÀN · SAFE"
-        self._system_status.setText(label)
-        self._system_status.style().unpolish(self._system_status)
-        self._system_status.style().polish(self._system_status)
+        labels = {
+            SafetyState.SAFE: ("AN TOÀN", "statusSafe"),
+            SafetyState.WARNING: ("CẢNH BÁO SỚM", "statusWarning"),
+            SafetyState.ALARM: ("BÁO ĐỘNG ĐỎ", "statusAlarm"),
+        }
+        label, object_name = labels[safety.state]
+        self._safety_badge.setText(label)
+        self._safety_badge.setObjectName(object_name)
+        self._safety_badge.style().unpolish(self._safety_badge)
+        self._safety_badge.style().polish(self._safety_badge)
+        self._people_value.setText(f"{detection_count:02d}")
+        self._machine_state_value.setText(
+            "DỪNG KHẨN CẤP" if safety.estop_triggered else "ĐANG CHẠY"
+        )
+        delay = self._delay_slider.value() / 10.0
+        duration = safety.violation_duration
+        self._intrusion_buffer_label.setText(
+            f"Bộ đệm thời gian xâm nhập (Chống nhiễu): "
+            f"{duration:.2f}s / {delay:.2f}s"
+        )
+        progress = (
+            1000
+            if delay <= 0 and safety.state is SafetyState.ALARM
+            else round(min(1.0, duration / delay) * 1000)
+            if delay > 0
+            else 0
+        )
+        self._intrusion_progress.setValue(progress)
         self._ack_button.setEnabled(safety.latched)
         self._estop_status.setText(
             "E-STOP: ĐÃ KÍCH HOẠT"
@@ -2573,8 +3210,25 @@ class HMIMainWindow(QMainWindow):
             return
 
         self._filtered_events = filtered
-        self._render_audit_table(filtered)
+        table_fingerprint = tuple(
+            (event.event_id, event.violation_duration)
+            for event in filtered
+        )
+        if table_fingerprint != self._audit_table_fingerprint:
+            self._audit_table_fingerprint = table_fingerprint
+            self._render_audit_table(filtered)
         self._refresh_carousel(filtered)
+        current_hour = datetime.now().hour
+        current_shift = (
+            1 if 6 <= current_hour < 14
+            else 2 if 14 <= current_hour < 22
+            else 3
+        )
+        shift_events = self._audit_logger.filter_by_shift(
+            current_shift,
+            current_events,
+        )
+        self._shift_alarms_value.setText(f"{len(shift_events):02d}")
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Dừng worker CV, camera, còi và ghi ảnh trước khi đóng cửa sổ.

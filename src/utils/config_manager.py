@@ -79,6 +79,10 @@ class ConfigManager:
             },
             "roi_points": [list(point) for point in DEFAULT_ROI_POINTS],
             "occlusion_polygons": [],
+            "display_overlays": {
+                "bounding_box": True,
+                "foot_point": True,
+            },
             "min_area": 1500,
             "violation_delay": 0.8,
         }
@@ -170,6 +174,15 @@ class ConfigManager:
                     raise ValueError(
                         "Đỉnh vùng che khuất phải là [x, y] nguyên trong frame 640x360."
                     )
+
+        display_overlays = config.get("display_overlays")
+        if not isinstance(display_overlays, dict):
+            raise ValueError("'display_overlays' phải là một đối tượng JSON.")
+        for key in ("bounding_box", "foot_point"):
+            if not isinstance(display_overlays.get(key), bool):
+                raise ValueError(
+                    f"display_overlays.{key} phải là giá trị Boolean."
+                )
 
         min_area = config.get("min_area")
         if isinstance(min_area, bool) or not isinstance(min_area, (int, float)):

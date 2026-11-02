@@ -42,7 +42,7 @@
 
 ### 1.2.2. Mục tiêu Nghiệp vụ & Chống Báo động giả
 * **Chuyển đổi linh hoạt 3 nguồn đầu vào:** Hỗ trợ chuyển đổi mượt mà trực tiếp trên giao diện giữa Webcam (`Device ID: 0`), File Video thực nghiệm (`.mp4`, `.avi`) và Camera IP (`RTSP URL`) kèm cơ chế tự giải phóng tài nguyên RAM.
-* **Hiệu chuẩn vùng cấm động (Dynamic ROI):** Vẽ đa giác vùng nguy hiểm ($N \ge 3$ đỉnh) trực tiếp bằng chuột trên màn hình, hỗ trợ Undo/Reset và lưu vào `config.json`.
+* **Hiệu chuẩn vùng cấm động (Dynamic ROI):** Vẽ đa giác vùng nguy hiểm ($N \ge 3$ đỉnh) trực tiếp bằng chuột trên màn hình; hỗ trợ xóa đỉnh cuối, khôi phục mặc định và lưu vào `config.json`.
 * **Triệt tiêu báo động giả (False Positive Rejection):**
   * *Khử bóng đổ:* Chỉ kiểm tra điểm tiếp xúc chân người trên mặt sàn $P_{\text{foot}} = (x + w/2, y + h)$ thay vì dùng toàn bộ hộp bao thân trên.
   * *Chống nhiễu thoáng qua:* Tích hợp bộ đệm thời gian trễ ($t_{\text{delay}} = 0.8\text{s}$) và ngưỡng diện tích tối thiểu ($S_{\min} = 1500\text{ px}^2$).
@@ -121,8 +121,8 @@
 
 | Mã Actor | Tên Tác nhân | Phân loại | Mô tả Hành vi & Trách nhiệm Cốt lõi | Tham chiếu SRS |
 | :--- | :--- | :--- | :--- | :--- |
-| **ACT-01** | **Nhân viên Trực ca (Safety Operator)** | Primary Human | • Giám sát luồng Live Stream kèm lớp phủ ROI và điểm chân $P_{\text{foot}}$.<br>• Xác nhận sự cố và tắt còi báo động chốt giữ (`ACK ALARM`).<br>• **Lọc và tra cứu nhanh lịch sử vi phạm theo mốc thời gian (ca làm việc, ngày/giờ) và xem lại ảnh Snapshot tương ứng.**<br>• Xuất báo cáo vi phạm ra tệp `.csv`. | FR-4.4, FR-5.2, FR-5.3, FR-5.4 |
-| **ACT-02** | **Kỹ sư Hệ thống (System Admin)** | Primary Human | • **Chuyển đổi trực tiếp trên giao diện giữa 3 chế độ nguồn đầu vào: Webcam (`ID: 0`), Video Offline (`.mp4`, `.avi`), và Camera IP (`RTSP URL`).**<br>• Vẽ đa giác vùng cấm ROI bằng chuột, Undo/Reset và lưu `config.json`.<br>• Tinh chỉnh ngưỡng diện tích $S_{\min}$ và độ trễ báo động $t_{\text{delay}}$.<br>• Chuyển đổi chế độ xem chẩn đoán (RGB / MOG2 Mask / Canny Edge). | FR-1.1, FR-1.3, FR-2, FR-3.6, FR-6.2 |
+| **ACT-01** | **Nhân viên Trực ca (Safety Operator)** | Primary Human | • Giám sát Live Stream kèm HUD, ROI và lớp phủ điểm chân $P_{\text{foot}}$.<br>• Xác nhận sự cố và tắt còi báo động chốt giữ (`ACK ALARM`).<br>• **Lọc lịch sử theo ca/giờ và xem thumbnail Snapshot trực tiếp trên carousel.**<br>• Xuất báo cáo vi phạm ra tệp `.csv`. | FR-4.4, FR-5.2, FR-5.3, FR-5.4 |
+| **ACT-02** | **Kỹ sư Hệ thống (System Admin)** | Primary Human | • **Mở modal cấu hình và chuyển đổi giữa Webcam, Video Offline và Camera IP (`RTSP URL`).**<br>• Vẽ đa giác vùng cấm ROI bằng chuột, xóa đỉnh cuối/khôi phục mặc định và lưu `config.json`.<br>• Tinh chỉnh ngưỡng diện tích $S_{\min}$ và độ trễ báo động $t_{\text{delay}}$.<br>• Chuyển đổi chế độ xem chẩn đoán (RGB / MOG2 Mask / Canny Edge) và lớp phủ HUD. | FR-1.1, FR-1.3, FR-2, FR-3.6, FR-6.2 |
 | **ACT-03** | **Công nhân Nhà xưởng (Monitored Worker)** | External Human | • Di chuyển làm việc xung quanh máy móc trong vùng quan sát.<br>• Tạo bóng đổ nghiêng trên mặt sàn (kích hoạt bộ lọc khử bóng đổ).<br>• Bước chân thoáng qua ($< 0.8\text{s}$) hoặc xâm nhập vùng cấm ($\ge 0.8\text{s}$) kích hoạt báo động đỏ. | FR-3.7, FR-4.1, FR-4.2, Mục 6.1 |
 | **ACT-04** | **Nguồn cấp Camera & Bộ quản lý Luồng** | External Hardware & System | • Cung cấp khung hình từ Webcam (`0`), File Video (`.mp4`/`.avi`) hoặc `RTSP`.<br>• **Tự động giải phóng bộ nhớ và thiết bị (`cap.release()`, xóa hàng đợi Queue, đóng Thread cũ) khi chuyển đổi mượt mà giữa các nguồn.**<br>• Tự động bắt lỗi mất tín hiệu và thực thi `Auto-Reconnect` mỗi $3.0\text{s}$. | FR-1.1, FR-1.2, NFR-2, NFR-3 |
 | **ACT-05** | **Lõi Xử lý Thị giác (VisionGuard CV Engine)** | Internal Autonomous Engine | • Thực thi chuỗi tiền xử lý, trừ nền MOG2, Morphology, tìm Contour và tính điểm chân $P_{\text{foot}}$.<br>• Phát hiện biến thiên ánh sáng đột ngột ($> 60\%$ khung hình) để tự động reset nền (chống sốc sáng).<br>• Tự động chụp ảnh bằng chứng `cv2.imwrite()` và ghi bản ghi nhật ký. | FR-3.1 $\rightarrow$ FR-3.7, FR-5.1, Mục 6.2 |
@@ -141,6 +141,8 @@
   2. Giao diện tuân thủ chuẩn ISA-101 với tông nền sáng trung tính; ở trạng thái bình thường (`SAFE`), viền đa giác ROI hiển thị nét đứt màu xanh ngọc hoặc vàng nhạt, không xuất hiện mảng màu đỏ gây nhiễu thị giác.
   3. Mỗi đối tượng chuyển động hợp lệ (có diện tích $S \ge 1500\text{ px}^2$) phải được đóng khung chữ nhật (`Bounding Box`) kèm theo một chấm tròn đánh dấu chính xác tọa độ điểm chân tiếp xúc sàn $P_{\text{foot}} = (x + w/2, y + h)$.
   4. Góc màn hình hiển thị thời gian thực các chỉ số kỹ thuật gồm: Nhịp FPS hiện tại, trạng thái kết nối luồng và số lượng người trong khung hình.
+  5. HMI dùng nền `#F1F5F9`, card trắng bo góc, header ViewLab Engineering; HUD bán trong suốt nằm trong ảnh hiển thị thời gian, nguồn và kết quả `cv2.pointPolygonTest`, không vẽ dòng FPS đè lên video.
+  6. Cột vận hành có badge SAFE/WARNING/ALARM, số người, số cảnh báo trong ca, trạng thái E-STOP và progress thời gian xâm nhập; kỹ sư có công tắc hiển thị riêng cho Bounding Box và điểm chân.
 
 ### US-02: Xác nhận sự cố và ngắt còi báo động (ACK Alarm)
 * **Câu chuyện:** *"Tôi là **Nhân viên Trực ca An toàn (Safety Operator)**, muốn nhấn nút `[Xác nhận sự cố / Tắt còi]` (ACK ALARM) để **xác nhận đã biết sự cố và tắt còi trong khi người vi phạm còn đứng trong ROI, nhưng vẫn giữ cảnh báo đỏ cho đến khi người đó bước ra**."*
@@ -155,8 +157,8 @@
 * **Điều kiện chấp nhận (Acceptance Criteria - AC):**
   1. Thanh công cụ lọc cho phép truy vấn theo 3 ca chuẩn (*Ca 1: 06:00–14:00*, *Ca 2: 14:00–22:00*, *Ca 3: 22:00–06:00*) hoặc nhập khoảng thời gian tùy chỉnh (`Từ HH:MM đến HH:MM`) với thời gian truy xuất $< 100\text{ ms}$.
   2. Khi áp dụng bộ lọc, cả Bảng Nhật ký Thời gian thực (40% bên phải) và Khay ảnh Snapshot Carousel cuộn ngang (60% bên trái) phải đồng bộ hiển thị đúng các bản ghi thuộc khung giờ đã chọn.
-  3. Mỗi thẻ trên Snapshot Carousel phải hiển thị rõ ảnh thu nhỏ (thumbnail), nhãn thời gian `[Ảnh HH:MM:SS]` và thời lượng `Vi phạm: X.Xs`.
-  4. Khi nhấp đúp hoặc click vào thẻ ảnh bất kỳ, hệ thống mở cửa sổ phóng to (Preview Modal) hiển thị ảnh gốc từ thư mục `/evidence/` có vẽ sẵn hộp bao đỏ, chấm tọa độ chân và dấu thời gian.
+  3. Mỗi thẻ Snapshot hiển thị trực tiếp thumbnail ảnh `.jpg` cùng badge `[Ảnh HH:MM:SS]`, `Vi phạm: X.Xs` và `Xem →`; carousel cập nhật khi ảnh nền đã ghi xong.
+  4. Click thẻ mở cửa sổ phóng to (Preview Modal) ảnh gốc từ `/evidence/`, có hộp bao, điểm chân và dấu thời gian.
 
 ### US-04: Trích xuất báo cáo vi phạm ra tệp CSV
 * **Câu chuyện:** *"Tôi là **Nhân viên Trực ca An toàn (Safety Operator)**, muốn làm thao tác **xuất toàn bộ dữ liệu nhật ký vi phạm (hoặc danh sách đã lọc theo ca) ra tệp định dạng `.csv`** để **lưu trữ hồ sơ an toàn lao động và gửi báo cáo tổng hợp cho ban quản lý nhà xưởng cuối mỗi ca làm việc**."*
@@ -173,9 +175,9 @@
 ### US-05: Chuyển đổi linh hoạt giữa 3 chế độ nguồn đầu vào (Webcam, Video Offline, RTSP)
 * **Câu chuyện:** *"Tôi là **Kỹ sư Hệ thống (System Admin)**, muốn làm thao tác **cấu hình và chuyển đổi trực tiếp trên giao diện giữa Webcam (dò các ID từ 0 đến 4, có chế độ tự động chọn), Tệp video thực nghiệm (`.mp4`, `.avi`) và Luồng Camera IP (`RTSP URL`)** để **linh hoạt kiểm thử thuật toán ngoại tuyến, demo báo cáo ổn định hoặc vận hành thực tế tại nhà xưởng**."*
 * **Điều kiện chấp nhận (Acceptance Criteria - AC):**
-  1. Bảng cấu hình nguồn cho phép chọn webcam đã dò thành công trong dải ID `0–4` hoặc `Tự động dò (Auto)` (chọn webcam hoạt động đầu tiên), `Video File (.mp4/.avi)` thông qua hộp thoại chọn tệp, hoặc `RTSP Stream` với các trường nhập IP, Port (mặc định `554`), Username, Password và Profile hãng (Hikvision, Dahua, ONVIF).
-  2. Khi nhấn `[Áp dụng / Chuyển nguồn]`, hệ thống chuyển đổi luồng video mượt mà trong thời gian $< 1.5\text{ giây}$ mà không cần khởi động lại ứng dụng và không làm đơ giao diện (`UI Freeze`).
-  3. Quét webcam ưu tiên backend DirectShow trên Windows, xác minh mở được và đọc được frame, đồng thời giải phóng từng kết nối sau khi thử; nếu Auto không tìm thấy camera, giao diện phải thông báo rõ ràng.
+  1. Nút `[Kết nối Camera IP]` mở modal cho phép chọn Webcam Auto/ID `0–4`, video `.mp4/.avi`, hoặc RTSP; biểu mẫu RTSP có profile Dahua/Imou, Hikvision/Ezviz, ONVIF, IP, port `554`, tài khoản và mật khẩu, kèm chuỗi `cv2.VideoCapture`.
+  2. Nút `[Kiểm tra kết nối (Ping)]` kiểm tra mở nguồn và đọc frame ngoài GUI thread; quét Webcam ưu tiên DirectShow trên Windows, giải phóng capture sau thử và thông báo rõ nếu thất bại.
+  3. `[Lưu & Áp dụng]` gửi yêu cầu chuyển nguồn qua worker hiện có, không khóa GUI; cấu hình hợp lệ được lưu vào `config.json`.
   4. Toàn bộ thông số kết nối hợp lệ sau khi áp dụng phải được tự động ghi đè và lưu trữ bền vững vào tệp `config.json`.
 
 ### US-06: Thiết lập và hiệu chuẩn đa giác vùng nguy hiểm động (Dynamic ROI Calibration)
@@ -194,6 +196,7 @@
   1. Thanh trượt ngưỡng diện tích tối thiểu $S_{\min}$ cho phép điều chỉnh trong dải từ $500\text{ px}^2$ đến $5000\text{ px}^2$ (giá trị mặc định chuẩn là $1500\text{ px}^2$).
   2. Thanh trượt độ trễ báo động $t_{\text{delay}}$ cho phép điều chỉnh trong dải từ $0.0\text{s}$ đến $3.0\text{s}$ với bước nhảy $0.1\text{s}$ (giá trị mặc định chuẩn là $0.8\text{s}$).
   3. Mọi thay đổi trên thanh trượt phải có hiệu lực tức thời trên pipeline xử lý ảnh ở frame tiếp theo và tự động đồng bộ vào tệp `config.json`.
+  4. Card cấu hình có nút `[Reset chuẩn]` khôi phục `minArea = 1500 px²` và `t_delay = 0.8 s`.
 
 ### US-08: Chuyển đổi bộ lọc hiển thị thuật toán phục vụ chẩn đoán (HUD Debug)
 * **Câu chuyện:** *"Tôi là **Kỹ sư Hệ thống (System Admin)**, muốn làm thao tác **chuyển đổi nhanh giữa 3 lớp hiển thị gồm Ảnh thực tế (RGB), Mặt nạ nhị phân trừ nền (MOG2 Mask) và Đường biên (Canny Edge)** để **kiểm tra trực quan chất lượng tách nền, mức độ nhiễu hạt môi trường và chứng minh thuật toán thị giác máy tính đang hoạt động thực tế**."*
@@ -202,6 +205,7 @@
   2. Chế độ `MOG2 Mask` hiển thị khung hình nhị phân đen-trắng-xám trích xuất từ bộ trừ nền (vật thể chuyển động màu trắng `255`, bóng đổ màu xám `127`, nền tĩnh màu đen `0`).
   3. Chế độ `Canny Edge` hiển thị bản đồ đường biên sắc nét của các đối tượng trong khung hình.
   4. Việc chuyển đổi qua lại giữa 3 chế độ hiển thị không làm gián đoạn tiến trình kiểm tra an toàn chạy ngầm và giữ nguyên tốc độ $\ge 20 - 25\text{ FPS}$.
+  5. Hai checkbox `Khung Bounding Box` và `Tọa độ Điểm chân` bật/tắt độc lập lớp phủ tương ứng và lưu trạng thái vào `config.json`.
 
 ---
 
