@@ -15,6 +15,7 @@ from typing import TypeAlias
 
 import cv2
 import numpy as np
+from src.utils.telegram_notifier import notify_violation
 
 
 LOGGER = logging.getLogger(__name__)
@@ -507,6 +508,19 @@ class AuditLogger:
             with self._lock:
                 self._write_errors.pop(job.event.event_id, None)
                 self._written_event_ids.add(job.event.event_id)
+                try:
+                    occurred_time = getattr(job.event, "occurred_at", None)
+                    time_str = occurred_time.strftime("%Y-%m-%d %H:%M:%S") if occurred_time else "Thời gian thực"
+                    event_id = getattr(job.event, "event_id", "VIO")
+
+                    notify_violation(
+                    image_path=str(job.event.image_path),
+                    timestamp_str=f"{time_str} ({event_id})",
+                    duration=float(getattr(job.event, "dwell_seconds", 0.0)),
+                    device_name="Vùng Cấm #01"
+                )
+                except Exception as e:
+                    LOGGER.error("Lỗi khi gửi cảnh báo Telegram: %s", e)
 
     @staticmethod
     def _annotate_frame(
