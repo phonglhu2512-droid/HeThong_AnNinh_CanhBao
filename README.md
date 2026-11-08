@@ -1,32 +1,53 @@
-# VisionGuard AI — Industrial Safety Monitoring System (HMI ISA-101 Standard)
+# VisionGuard AI (Nguyen-iSafe) — Industrial & Civil Safety Audit System
 
 [![Release](https://img.shields.io/badge/Release-v1.0.0-crimson.svg)](https://github.com/phonglhu2512-droid/HeThong_AnNinh_CanhBao)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
-[![Framework](https://img.shields.io/badge/UI-PyQt6-green.svg)](https://riverbankcomputing.com/software/pyqt/)
-[![AI Engine](https://img.shields.io/badge/AI-YOLOv8--Nano-purple.svg)](https://docs.ultralytics.com/)
+[![UI Framework](https://img.shields.io/badge/UI-PyQt6-green.svg)](https://riverbankcomputing.com/software/pyqt/)
+[![AI Inference](https://img.shields.io/badge/AI-YOLOv8--Nano-purple.svg)](https://docs.ultralytics.com/)
 [![Standard](https://img.shields.io/badge/Standard-ISA--101%20HMI-orange.svg)](#)
 
-Hệ thống giám sát an ninh và an toàn lao động thời gian thực tích hợp Computer Vision (OpenCV) và Trí tuệ nhân tạo (YOLOv8-Nano). Giải pháp hỗ trợ kết nối trực tiếp với hệ thống Camera IP giám sát công nghiệp (giao thức RTSP) hoặc Webcam, phát hiện xâm nhập vùng nguy hiểm xung quanh các thiết bị cơ khí (máy dập thủy lực, robot công nghiệp), tự động ngắt khẩn cấp (E-STOP) và lưu trữ bằng chứng vi phạm.
+Hệ thống thị giác máy tính giám sát ranh giới an toàn thời gian thực và **Kiểm toán Tuân thủ An toàn Lao động (Safety Audit Trail)** ứng dụng Trí tuệ Nhân tạo (YOLOv8-Nano) tích hợp chuẩn giao diện điều khiển công nghiệp **ISA-101 HMI**.
 
 ---
 
-## 📌 Các Tính Năng Nổi Bật
+## 💡 Bối Cảnh Thực Tế & Bài Toán Giải Quyết
 
-- **Mô hình Hybrid AI (YOLOv8n + Geometric Engine):**
-  - Nhận diện người chính xác (`class 0: person`), loại bỏ hoàn toàn báo động giả do đồ vật tĩnh hoặc thay đổi ánh sáng.
-  - Thuật toán kích hoạt đa điều kiện: Kiểm tra điểm tiếp xúc sàn ($P_{\text{foot}}$) và sự giao cắt giữa hộp bao Bounding Box với đa giác vùng cấm (ROI).
-- **Giao diện Giám sát Chuẩn Công nghiệp (ISA-101 High-Performance HMI):**
-  - Tối ưu hóa thị giác theo tiêu chuẩn ISA-101 với bảng màu tương phản nhẹ nhàng, điểm nhấn Đỏ đô `#9B1B30` và Xanh ngọc `#10B981`.
-  - Bộ thẻ trạng thái vận hành trực quan, theo dõi số lượng người, số lượt cảnh báo theo ca và trạng thái máy dập.
-- **Tương tác Vùng cấm (ROI) & Vùng che chắn (Machine Mask):**
-  - Hỗ trợ công cụ click chuột chấm điểm vẽ đa giác vùng cấm linh hoạt trực tiếp trên màn hình Live Stream.
-  - Tính năng vẽ vùng Mask che chắn các chi tiết cơ khí chuyển động lặp lại để loại trừ nhiễu quang học.
-- **Quản lý Bằng chứng Vi phạm (Snapshot Carousel & Audit Logger):**
-  - Tự động trích xuất và hiển thị các thẻ ảnh vi phạm kèm mốc thời gian (Timestamp) dạng cuộn ngang (Bottom Dock).
-  - Tự động ghi nhật ký vi phạm ra file báo cáo `Violation_Report.csv` phục vụ kiểm toán an toàn lao động.
-- **Xử lý Luồng Video & Giao thức Công nghiệp:**
-  - Kiến trúc xử lý đa luồng bất đồng bộ (Multi-threading với `Queue(maxsize=1)`) bảo đảm UI không bao giờ bị giật lag.
-  - Hỗ trợ đa dạng nguồn cấp: RTSP Stream (Camera Dahua, Imou, Hikvision...), Webcam USB/Laptop (tự động cân chỉnh lật gương) và Video File.
+Hệ thống được phát triển nhằm giải quyết triệt để 3 rào cản thực tế từ hộ dân dụng cho đến các nhà xưởng cơ khí vừa và nhỏ (SME):
+
+1. **Vấn nạn báo động giả từ Camera IP thông dụng (False Alarm Fatigue):**
+   - Các dòng camera an ninh gia đình/thông dụng (Imou, Dahua, Hikvision, Ezviz) sử dụng thuật toán phát hiện chuyển động dựa trên biến đổi điểm ảnh (Pixel Motion) hoặc chip AI giá rẻ. Hậu quả là côn trùng bay qua mắt cam, bụi bẩn, bóng râm thay đổi hay đèn xe ban đêm đều kích hoạt còi/thông báo liên tục, gây ức chế cho người dùng.
+   - Tính năng khoanh vùng cảnh báo sẵn có trên app camera rất sơ sài, chỉ cho phép vẽ các khung thô sơ, nhận diện kém chính xác và không phân biệt được đâu là con người hay đồ vật.
+2. **Chi phí hệ thống Vision công nghiệp chuyên dụng quá đắt đỏ:**
+   - Các giải pháp Machine Vision chuyên dụng (Cognex, Keyence) có giá từ hàng chục đến hàng trăm triệu đồng cho một vị trí giám sát, vượt quá khả năng tài chính của các phân xưởng vừa và nhỏ.
+3. **Cảm biến phần cứng tại xưởng bị "Mù dữ liệu":**
+   - Rơ-le hay cảm biến quang bảo vệ máy chỉ biết hú còi/ngắt máy tại chỗ rồi im lặng khi người rút ra, hoàn toàn không có bằng chứng hình ảnh đối chất, không ghi nhận được tần suất vi phạm theo ca làm việc để chấn chỉnh hành vi làm ẩu trước khi tai nạn xảy ra.
+
+### 👉 Giải pháp đột phá của VisionGuard AI:
+* **Bộ lọc AI loại bỏ 100% báo động giả:** Ứng dụng mô hình **YOLOv8n** phân tích chuẩn xác hình thể người (`class 0: person`), triệt tiêu hoàn toàn nhiễu từ côn trùng, ánh sáng hay chuyển động cơ khí lặp lại.
+* **Khoanh vùng linh hoạt (Zero-Downtime Polygon ROI):** Cho phép vẽ đa giác tự do bao quanh khu vực cần bảo vệ bằng chuột trong vài giây, kết hợp thuật toán điểm chạm chân (`FootPoint`) và vùng che máy (`Machine Mask`).
+* **Tận dụng tối đa hạ tầng sẵn có (Zero Additional Hardware Cost):** Kéo trực tiếp luồng RTSP nội bộ từ các mắt Camera IP thông dụng sẵn có trong xưởng/nhà ở, nâng cấp camera an ninh thông thường thành hệ thống giám sát an toàn thông minh.
+* **Kiến trúc An toàn Kép & Lưu vết Kiểm toán (Hybrid Safety & Audit Trail):** Chạy song song bổ trợ rào chắn cảm biến, tự động chụp ảnh bằng chứng có khung vi phạm, đo thời gian chiếm dụng, xuất báo cáo CSV theo ca và gửi cảnh báo tức thì qua Telegram.
+
+---
+
+## 📌 Các Tính Năng Kỹ Thuật Nổi Bật
+
+- **Lõi AI Nhận Diện Người (YOLOv8n Inference):**
+  - Nhận diện chính xác hình dáng con người (`class 0: person`), loại bỏ hoàn toàn báo động giả do đồ vật tĩnh, bóng râm hay ánh sáng đèn xưởng thay đổi.
+  - Thuật toán tiếp xúc sàn: Phân tích tọa độ chân (`FootPoint`) kết hợp giao cắt hộp bao (`BoundingBox`) với đa giác vùng cấm.
+- **Tái Cấu Hình Vùng Cấm Nhanh Chóng (Zero-Downtime ROI & Mask):**
+  - Cho phép Kỹ sư dùng chuột chấm điểm vẽ đa giác vùng cấm (ROI) linh hoạt trên màn hình chỉ trong vài giây, không tốn công đục sàn kéo dây như cảm biến cứng khi đổi layout máy.
+  - Hỗ trợ công cụ vẽ vùng che chắn cơ khí (Machine Mask) nhằm triệt tiêu báo động giả từ các chuyển động tuần hoàn của tay máy.
+- **Lưu Vết Kiểm Toán & Xuất Báo Cáo (Safety Audit Trail):**
+  - Tự động đóng khung đỏ, gán mốc thời gian và trích xuất ảnh bằng chứng vi phạm hiển thị trực tiếp trên thanh cuộn (Bottom Dock).
+  - Tích hợp bộ lọc sự kiện theo khung giờ/ca làm việc và chức năng xuất file báo cáo `Violation_Report.csv`.
+- **Cảnh Báo Từ Xa Tức Thời Qua Telegram (Daemon Telemetry):**
+  - Module truyền thông chạy trên luồng ngầm độc lập (`Daemon Thread`), lập tức gửi ảnh chụp hiện trường và thông tin vi phạm về ứng dụng Telegram của Quản đốc/Chủ cơ sở mà không làm gián đoạn luồng xử lý video.
+- **Bảng Điều Khiển Chuẩn Công Nghiệp ISA-101 HMI:**
+  - Thiết kế bảng màu tương phản nhẹ nhàng, giảm mỏi mắt cho người vận hành, chỉ kích hoạt điểm nhấn đỏ đô `#9B1B30` và âm thanh khi có sự cố.
+  - Tích hợp cơ chế **Phân quyền hai lớp**: Chế độ *Giám sát (Khóa)* an toàn cho người vận hành và chế độ *Kỹ sư (Setup)* có mật khẩu quản trị.
+- **Xử Lý Luồng Video Công Nghiệp Ổn Định:**
+  - Kiến trúc đa luồng bất đồng bộ (`Queue(maxsize=1)`) triệt tiêu hiện tượng dồn frame và trễ tích lũy trên luồng RTSP mạng LAN.
 
 ---
 
@@ -49,6 +70,7 @@ HeThong_AnNinh_CanhBao/
 │   └── utils/
 │       ├── audit_logger.py      # Module lưu vết, xuất báo cáo CSV và ảnh vi phạm
 │       └── config_manager.py    # Đọc/ghi cấu hình JSON an toàn
+│       └── telegram_notifier.py # Module gửi cảnh báo & ảnh bằng chứng qua Telegram Bot
 ├── main.py                      # Điểm khởi chạy ứng dụng chính
 ├── yolov8n.pt                   # Trọng số mô hình nhận diện người YOLOv8-Nano
 └── requirements.txt             # Danh sách thư viện phụ thuộc
@@ -85,6 +107,20 @@ pip install -r requirements.txt
 # 5. Khởi chạy phần mềm
 python main.py
 ```
+
+---
+
+## 📲 Kiến Trúc Cảnh Báo Telegram (Telegram Alert Subsystem)
+
+### 1. Chế độ Nghiệm thu Tức thì (Zero-Config PoC Mode)
+Phiên bản đóng gói thực thi (`.exe`) đã được tích hợp sẵn kênh truyền mã hóa tới Bot Gateway quản trị[cite: 15]. Khi hệ thống phát hiện xâm nhập vượt ngưỡng trễ an toàn (`dwell_seconds`), hình ảnh bằng chứng kèm mã sự kiện (`VIO-xxx`) sẽ tự động gửi thẳng về thiết bị di động mà không yêu cầu người chấm thẩm định phải cấu hình thủ công[cite: 15].
+
+### 2. Lộ trình Thương mại hóa Đa Phân xưởng (Enterprise Multi-Tenant)
+Khi triển khai thực tế tại nhiều nhà máy khác nhau, kỹ sư hệ thống thiết lập kênh nhận cảnh báo độc lập qua 3 bước[cite: 15]:
+
+1. Truy cập `@BotFather` trên Telegram, dùng lệnh `/newbot` để khởi tạo Bot riêng của nhà máy và lấy chuỗi `BOT_TOKEN`[cite: 15].
+2. Nhắn tin tới `@userinfobot` để lấy mã định danh `CHAT_ID` của Quản đốc hoặc Group An toàn lao động[cite: 15].
+3. Cập nhật thông số `BOT_TOKEN`, `CHAT_ID` và tên vị trí thiết bị (`device_name`) trong module điều phối để định tuyến cảnh báo về đúng bộ phận phụ trách[cite: 15].
 
 ---
 
